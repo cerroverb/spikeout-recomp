@@ -1,6 +1,7 @@
 // The update check's version rules (src/net/update.hpp), built with or
 // without libcurl (the unit tests use them).
 #include "net/update.hpp"
+#include "net/url.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -63,7 +64,9 @@ std::optional<Release> newer_release(const Json& releases, std::string_view curr
         if (r["prerelease"].as_bool() && !prerelease(current)) continue; // (test builds only offered to test builds)
         if (compare_versions(tag, current) <= 0) continue;
         if (best && compare_versions(tag, best->version) <= 0) continue;
-        best = Release{tag, r["html_url"].as_string()};
+        const std::string& page = r["html_url"].as_string();
+        if (!is_https_url(page)) continue; // (opened by the system when chosen)
+        best = Release{tag, page};
     }
     return best;
 }

@@ -4,6 +4,7 @@
 #include "net/curl_init.hpp"
 #include "net/json.hpp"
 #include "net/lobby.hpp" // (kLobbyUrl: uploads go to the lobby)
+#include "net/url.hpp"
 
 #include <atomic>
 #include <cstdlib>
@@ -97,6 +98,10 @@ DeviceCode login_start() {
         d.device_code = (*j)["device_code"].as_string();
         d.user_code = (*j)["user_code"].as_string();
         d.verification_uri = (*j)["verification_uri"].as_string();
+        if (!is_https_url(d.verification_uri)) { // (the system opens it)
+            d.error = "GitHub gave a login page that isn't an https address";
+            return d;
+        }
         d.interval = static_cast<int>((*j)["interval"].as_number(5));
         d.expires_in = static_cast<int>((*j)["expires_in"].as_number(900));
     } else {

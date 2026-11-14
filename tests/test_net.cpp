@@ -4,6 +4,7 @@
 #include "net/session.hpp"
 #include "net/stun.hpp"
 #include "net/update.hpp"
+#include "net/url.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -374,16 +375,39 @@ TEST_CASE("net update: versions compared as the releases' tags, the newest newer
     CHECK(!dev_build("0.1.0-preview1"));
 
     const auto list = Json::parse(R"([
-        {"tag_name": "v0.2.0", "draft": true, "prerelease": false, "html_url": "draft"},
-        {"tag_name": "v0.1.1-preview1", "draft": false, "prerelease": true, "html_url": "p1"},
-        {"tag_name": "v0.1.0", "draft": false, "prerelease": false, "html_url": "r010"},
-        {"tag_name": "v0.1.0-preview1", "draft": false, "prerelease": true, "html_url": "p0"}
+        {"tag_name": "v0.2.0", "draft": true, "prerelease": false, "html_url": "https://github.com/draft"},
+        {"tag_name": "v0.1.1-preview1", "draft": false, "prerelease": true, "html_url": "https://github.com/p1"},
+        {"tag_name": "v0.1.0", "draft": false, "prerelease": false, "html_url": "https://github.com/r010"},
+        {"tag_name": "v0.1.0-preview1", "draft": false, "prerelease": true, "html_url": "https://github.com/p0"}
     ])");
     CHECK(list.has_value());
     const auto a = newer_release(*list, "0.1.0-preview1"); // a test build: offered test builds too
-    CHECK(a.has_value() && a->version == "0.1.1-preview1" && a->page == "p1");
+    CHECK(a.has_value() && a->version == "0.1.1-preview1" && a->page == "https://github.com/p1");
     const auto b = newer_release(*list, "0.0.9"); // a release: only releases (never the draft)
-    CHECK(b.has_value() && b->version == "0.1.0" && b->page == "r010");
+    CHECK(b.has_value() && b->version == "0.1.0" && b->page == "https://github.com/r010");
     CHECK(!newer_release(*list, "0.1.0").has_value());
     CHECK(!newer_release(*list, "0.1.1-preview1").has_value());
+}
+
+TEST_CASE("net update: a release whose page isn't an https address is not offered") {
+    const auto list = Json::parse(R"([
+        {"tag_name": "v0.3.0", "draft": false, "prerelease": false, "html_url": "file:///etc/passwd"},
+        {"tag_name": "v0.2.0", "draft": false, "prerelease": false, "html_url": "https://github.com/r020"}
+    ])");
+    CHECK(list.has_value());
+    const auto r = newer_release(*list, "0.1.0");
+    CHECK(r.has_value() && r->version == "0.2.0" && r->page == "https://github.com/r020");
+}
+
+TEST_CASE("net url: only https addresses are opened") {
+    CHECK(is_https_url("https://github.com/login/device"));
+    CHECK(is_https_url("HTTPS://github.com/"));
+    CHECK(!is_https_url("https://"));
+    CHECK(!is_https_url(""));
+    CHECK(!is_https_url("http://github.com/"));
+    CHECK(!is_https_url("file:///C:/Windows/System32/calc.exe"));
+    CHECK(!is_https_url("javascript:alert(1)"));
+    CHECK(!is_https_url(" https://github.com/"));
+    CHECK(!is_https_url("https://github.com/a b"));
+    CHECK(!is_https_url("https://github.com/\n"));
 }
