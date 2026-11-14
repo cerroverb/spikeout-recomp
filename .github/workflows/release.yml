@@ -21,7 +21,7 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   VERSION: ${{ inputs.version || github.ref_name }}
@@ -240,6 +240,8 @@ jobs:
     needs: [windows, linux, macos]
     if: ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success' }}
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write # (gh release delete and create)
     steps:
       - uses: actions/checkout@v4
       - name: The version
