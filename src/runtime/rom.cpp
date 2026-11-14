@@ -252,8 +252,10 @@ RomSet load_rom_set(const GameSpec& game, const std::filesystem::path& dir) {
         for (const RomFile& file : spec.files) {
             RomFileReport rep{spec.id, std::string(file.name), RomFileStatus::Ok, 0, 0, file.crc32};
             const std::string name = lower(file.name);
-            if (!files.size(name)) {
-                rep.status = RomFileStatus::Missing;
+            const auto size = files.size(name);
+            if (!size || *size != file.size) { // (a wrong size not read: a zip's size is only its claim)
+                rep.status = size ? RomFileStatus::WrongSize : RomFileStatus::Missing;
+                rep.actual_size = size.value_or(0);
                 set.report.push_back(rep);
                 continue;
             }

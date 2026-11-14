@@ -3,12 +3,14 @@
 #include "games/games.hpp"
 #include "runtime/memory_map.hpp"
 #include "runtime/rom.hpp"
+#include "runtime/zip.hpp"
 
 #include <array>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -187,4 +189,121 @@ TEST_CASE("rom: load_rom_set reads, verifies and interleaves files from disk") {
     CHECK((set.region(RomRegionId::Vrom) == std::vector<uint8_t>{0x00, 0x11, 0x44, 0x55, 0x22, 0x33, 0x66, 0x77}));
 
     fs::remove_all(dir);
+}
+
+namespace {
+
+struct ZipMember {
+    std::string name;
+    uint16_t method;
+    std::vector<uint8_t> payload; // (as stored in the zip: packed when deflated)
+    uint32_t size;                // the directory's claims
+    uint32_t packed;
+    uint32_t crc;
+};
+
+// A zip file of `members` (local headers, then the central directory and its end), written to `path`.
+void write_zip(const std::filesystem::path& path, const std::vector<ZipMember>& members) {
+    std::vector<uint8_t> zip, dir;
+    auto put16 = [](std::vector<uint8_t>& v, uint32_t x) { v.insert(v.end(), {uint8_t(x), uint8_t(x >> 8)}); };
+    auto put32 = [&](std::vector<uint8_t>& v, uint32_t x) {
+        put16(v, x & 0xFFFF);
+        put16(v, x >> 16);
+    };
+    for (const ZipMember& m : members) {
+        const auto header = static_cast<uint32_t>(zip.size());
+        auto common = [&](std::vector<uint8_t>& v) { // (version needed .. name length: the same in both headers)
+            put16(v, 20);
+            put16(v, 0);
+            put16(v, m.method);
+            put32(v, 0);
+            put32(v, m.crc);
+            put32(v, m.packed);
+            put32(v, m.size);
+            put16(v, static_cast<uint32_t>(m.name.size()));
+        };
+        put32(zip, 0x04034B50);
+        common(zip);
+        put16(zip, 0); // extra
+        zip.insert(zip.end(), m.name.begin(), m.name.end());
+        zip.insert(zip.end(), m.payload.begin(), m.payload.end());
+        put32(dir, 0x02014B50);
+        put16(dir, 20); // version made by
+        common(dir);
+        for (int i = 0; i < 4; ++i) put16(dir, 0); // extra, comment, disk, internal attributes
+        put32(dir, 0);                              // external attributes
+        put32(dir, header);
+        dir.insert(dir.end(), m.name.begin(), m.name.end());
+    }
+    const auto dir_at = static_cast<uint32_t>(zip.size());
+    zip.insert(zip.end(), dir.begin(), dir.end());
+    put32(zip, 0x06054B50);
+    put16(zip, 0);
+    put16(zip, 0);
+    put16(zip, static_cast<uint32_t>(members.size()));
+    put16(zip, static_cast<uint32_t>(members.size()));
+    put32(zip, static_cast<uint32_t>(dir.size()));
+    put32(zip, dir_at);
+    put16(zip, 0);
+    std::ofstream(path, std::ios::binary)
+        .write(reinterpret_cast<const char*>(zip.data()), static_cast<std::streamsize>(zip.size()));
+}
+
+bool zip_read_throws(ZipReader& zip, const std::string& name) {
+    try {
+        zip.read(zip.entries().at(name));
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
+
+// zlib's raw deflate of "abc" x 8: one fixed-code block, literals and a match.
+const std::vector<uint8_t> kAbcDeflated = {0x4B, 0x4C, 0x4A, 0x4E, 0xC4, 0x86, 0x00};
+
+} // namespace
+
+TEST_CASE("zip: stored and deflated files read back") {
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "spikeout-recomp-test.zip";
+    std::vector<uint8_t> abc;
+    for (int i = 0; i < 8; ++i) abc.insert(abc.end(), {'a', 'b', 'c'});
+    // 258 bytes in a deflate stored block: length 0x0102, so its two bytes taken in the wrong order refuse it
+    std::vector<uint8_t> run(258);
+    for (std::size_t i = 0; i < run.size(); ++i) run[i] = static_cast<uint8_t>(i * 7);
+    std::vector<uint8_t> stored_block = {0x01, 0x02, 0x01, 0xFD, 0xFE};
+    stored_block.insert(stored_block.end(), run.begin(), run.end());
+    write_zip(path, {
+                        {"Plain.bin", 0, abc, 24, 24, crc32(abc)},
+                        {"dir/fixed.bin", 8, kAbcDeflated, 24, 7, crc32(abc)},
+                        {"stored.bin", 8, stored_block, 258, static_cast<uint32_t>(stored_block.size()), crc32(run)},
+                    });
+    {
+        ZipReader zip(path);
+        CHECK_EQ(zip.entries().size(), std::size_t{3});
+        CHECK(zip.read(zip.entries().at("plain.bin")) == abc);
+        CHECK(zip.read(zip.entries().at("fixed.bin")) == abc);
+        CHECK(zip.read(zip.entries().at("stored.bin")) == run);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("zip: sizes the file can't hold are refused before reading") {
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "spikeout-recomp-test-huge.zip";
+    write_zip(path, {
+                        {"packed.bin", 0, kAbcDeflated, 0xFFFFFFF0, 0xFFFFFFF0, 0}, // more bytes than the file has
+                        {"unpacked.bin", 8, kAbcDeflated, 0xFFFFFFF0, 7, 0},       // more than 7 bytes inflate to
+                    });
+    {
+        ZipReader zip(path);
+        CHECK(zip_read_throws(zip, "packed.bin"));
+        CHECK(zip_read_throws(zip, "unpacked.bin"));
+    }
+    // a ROM set's file claiming the wrong size: reported, never read
+    const std::array files = {RomFile{"unpacked.bin", 0, 4, 0}};
+    const std::array regions = {RomRegionSpec{RomRegionId::Vrom, 4, 4, 4, false, files}};
+    const RomSet set = load_rom_set(GameSpec{"test", "Test", 0, regions}, path);
+    CHECK_EQ(set.report.size(), std::size_t{1});
+    CHECK(set.report[0].status == RomFileStatus::WrongSize);
+    CHECK_EQ(set.report[0].actual_size, uint64_t{0xFFFFFFF0});
+    std::filesystem::remove(path);
 }

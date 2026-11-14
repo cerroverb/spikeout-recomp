@@ -34,6 +34,7 @@ public:
 
 private:
     std::ifstream in_;
+    uint64_t file_size_ = 0;
     std::map<std::string, Entry> entries_;
 };
 

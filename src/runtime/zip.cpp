@@ -23,6 +23,9 @@ uint32_t le32(const uint8_t* p) {
 
 constexpr int kMaxBits = 15;
 constexpr int kFastBits = 10;
+// The most DEFLATE can unpack from a byte: a 258-byte match takes at least 2 bits (a 1-bit length code and a 1-bit
+// distance code), 4 matches a byte.
+constexpr uint64_t kMaxInflateRatio = 258 * 4;
 
 struct Huffman {
     std::array<uint16_t, kMaxBits + 1> count{};
@@ -255,7 +258,7 @@ bool inflate(const uint8_t* in, std::size_t in_size, std::vector<uint8_t>& out, 
 ZipReader::ZipReader(const std::filesystem::path& path) : in_(path, std::ios::binary) {
     if (!in_) throw std::runtime_error("cannot open " + path.string());
     in_.seekg(0, std::ios::end);
-    const auto file_size = static_cast<uint64_t>(in_.tellg());
+    const uint64_t file_size = file_size_ = static_cast<uint64_t>(in_.tellg());
     // the end of the central directory: in the last 22 bytes and up to 64 KB of comment
     const uint64_t tail = std::min<uint64_t>(file_size, 22 + 0xFFFF);
     std::vector<uint8_t> end(static_cast<std::size_t>(tail));
@@ -302,7 +305,11 @@ std::vector<uint8_t> ZipReader::read(const Entry& e) {
     in_.seekg(static_cast<std::streamoff>(e.header));
     in_.read(reinterpret_cast<char*>(local), 30);
     if (!in_ || le32(local) != 0x04034B50) throw std::runtime_error(e.name + ": damaged in the zip");
-    in_.seekg(static_cast<std::streamoff>(e.header + 30 + le16(local + 26) + le16(local + 28)));
+    const uint64_t data_at = e.header + 30 + le16(local + 26) + le16(local + 28);
+    // (sizes checked before anything is made that big: the directory's are only claims)
+    if (data_at > file_size_ || e.packed > file_size_ - data_at) throw std::runtime_error(e.name + ": cut short in the zip");
+    if (e.method == 8 && e.size > e.packed * kMaxInflateRatio) throw std::runtime_error(e.name + ": damaged in the zip");
+    in_.seekg(static_cast<std::streamoff>(data_at));
     std::vector<uint8_t> packed(static_cast<std::size_t>(e.packed));
     in_.read(reinterpret_cast<char*>(packed.data()), static_cast<std::streamsize>(packed.size()));
     if (!in_) throw std::runtime_error(e.name + ": cut short in the zip");
