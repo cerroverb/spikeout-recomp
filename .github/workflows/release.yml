@@ -38,7 +38,7 @@ jobs:
     env:
       LLVM_ROOT: ${{ github.workspace }}/.llvm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: The version
         run: echo "VERSION=${VERSION#release-build/}" >> "$GITHUB_ENV"
       # (the owner's compiler: WinLibs GCC 16.2.0 r2, POSIX threads, UCRT; its runtime linked in: SPIKEOUT_STATIC_RUNTIME)
@@ -56,7 +56,7 @@ jobs:
           echo "C:/ninja" >> "$GITHUB_PATH"
       - name: LLVM from the cache
         id: llvm
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.LLVM_ROOT }}
           key: llvm-windows-winlibs-16.2.0-r2-${{ hashFiles('cmake/llvm.cmake') }}
@@ -72,7 +72,7 @@ jobs:
         if: steps.llvm.outputs.cache-hit != 'true'
         run: rm -rf "$LLVM_ROOT"/*.tar.xz "$LLVM_ROOT"/work-* "$LLVM_ROOT"/*.log
       - if: steps.llvm.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.LLVM_ROOT }}
           key: ${{ steps.llvm.outputs.cache-primary-key }}
@@ -80,7 +80,7 @@ jobs:
         run: cmake --build build --parallel 4 --target spikeout-jit
       - name: Pack
         run: tools/package-release.sh "$VERSION" windows-x64 build/spikeout-jit.exe build out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows
           path: out/*.zip
@@ -96,7 +96,7 @@ jobs:
       LLVM_ROOT: ${{ github.workspace }}/.llvm
       SSL_ROOT: ${{ github.workspace }}/.openssl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: The version
         run: echo "VERSION=${VERSION#release-build/}" >> "$GITHUB_ENV"
       # (the SDK's CMake is older than LLVM 18 wants: Kitware's)
@@ -112,7 +112,7 @@ jobs:
       # (OpenSSL 3 built in: the SDK's is 1.1, which current Linux systems no longer have)
       - name: OpenSSL from the cache
         id: ssl
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.SSL_ROOT }}
           key: openssl-${{ env.OPENSSL_VERSION }}-sniper-gcc14
@@ -126,7 +126,7 @@ jobs:
           make -j4 && make install_sw && cp LICENSE.txt "$SSL_ROOT/"
       - name: LLVM from the cache
         id: llvm
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.LLVM_ROOT }}
           key: llvm-linux-sniper-gcc14-${{ hashFiles('cmake/llvm.cmake') }}
@@ -143,7 +143,7 @@ jobs:
         if: steps.llvm.outputs.cache-hit != 'true'
         run: rm -rf "$LLVM_ROOT"/*.tar.xz "$LLVM_ROOT"/work-* "$LLVM_ROOT"/*.log
       - if: steps.llvm.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.LLVM_ROOT }}
           key: ${{ steps.llvm.outputs.cache-primary-key }}
@@ -153,7 +153,7 @@ jobs:
         run: objdump -p build/spikeout-jit | grep -E 'NEEDED|GLIBC_2\.[0-9]+' | sort -u | tail -n 40
       - name: Pack
         run: OPENSSL_LICENSE="$SSL_ROOT/LICENSE.txt" tools/package-release.sh "$VERSION" linux-x64 build/spikeout-jit build out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux
           path: out/*.tar.gz
@@ -181,14 +181,14 @@ jobs:
       SSL_ROOT: ${{ github.workspace }}/.openssl
       MACOSX_DEPLOYMENT_TARGET: '13.3' # (libc++'s std::format of floats: 13.3; LLVM and OpenSSL in the cache were built for 12.0, which runs there)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: The version
         run: echo "VERSION=${VERSION#release-build/}" >> "$GITHUB_ENV"
       - name: Ninja
         run: brew install ninja
       - name: OpenSSL from the cache
         id: ssl
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.SSL_ROOT }}
           key: openssl-${{ env.OPENSSL_VERSION }}-${{ matrix.cache }}
@@ -203,7 +203,7 @@ jobs:
           make -j3 && make install_sw && cp LICENSE.txt "$SSL_ROOT/"
       - name: LLVM from the cache
         id: llvm
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.LLVM_ROOT }}
           key: llvm-${{ matrix.llvm }}-${{ hashFiles('cmake/llvm.cmake') }}
@@ -220,7 +220,7 @@ jobs:
         if: steps.llvm.outputs.cache-hit != 'true'
         run: rm -rf "$LLVM_ROOT"/*.tar.xz "$LLVM_ROOT"/work-* "$LLVM_ROOT"/*.log
       - if: steps.llvm.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.LLVM_ROOT }}
           key: ${{ steps.llvm.outputs.cache-primary-key }}
@@ -230,7 +230,7 @@ jobs:
         run: otool -L build/spikeout-jit
       - name: Pack
         run: OPENSSL_LICENSE="$SSL_ROOT/LICENSE.txt" tools/package-release.sh "$VERSION" ${{ matrix.platform }} build/spikeout-jit build out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.platform }}
           path: out/*.zip
@@ -243,10 +243,10 @@ jobs:
     permissions:
       contents: write # (gh release delete and create)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: The version
         run: echo "VERSION=${VERSION#release-build/}" >> "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: files
           merge-multiple: true
