@@ -411,3 +411,12 @@ TEST_CASE("net url: only https addresses are opened") {
     CHECK(!is_https_url("https://github.com/a b"));
     CHECK(!is_https_url("https://github.com/\n"));
 }
+
+TEST_CASE("net url: a folder's file:// URL, percent-encoded") {
+    CHECK_EQ(file_url("/home/me/.local/share/spikeout"), std::string("file:///home/me/.local/share/spikeout"));
+    CHECK_EQ(file_url("C:\\Users\\Me\\AppData\\Roaming\\spikeout"),
+             std::string("file:///C:/Users/Me/AppData/Roaming/spikeout"));
+    CHECK_EQ(file_url("/home/me/my games/#1 100%"), std::string("file:///home/me/my%20games/%231%20100%25"));
+    CHECK_EQ(file_url("/home/\xC3\xA9t\xC3\xA9"), std::string("file:///home/%C3%A9t%C3%A9"));
+    CHECK_EQ(file_url(std::string_view("/a\0b", 4)), std::string("file:///a%00b"));
+}

@@ -1,11 +1,32 @@
-// URLs handed to the system to open (SDL_OpenURL): pages named by GitHub's answers are checked first.
+// URLs handed to the system to open (SDL_OpenURL): pages named by GitHub's answers are checked first, and folders
+// are made into file:// URLs.
 #pragma once
 
 #include <cctype>
 #include <cstddef>
+#include <cstdio>
+#include <string>
 #include <string_view>
 
 namespace net {
+
+// A folder's file:// URL: `path` (UTF-8, Windows' backslashes or not) with every byte but letters, digits and
+// "/:._-~" percent-encoded (spaces, '#', '%', non-ASCII names).
+inline std::string file_url(std::string_view path) {
+    std::string url = "file://";
+    if (!path.empty() && path[0] != '/') url += '/'; // (C:/...: file:///C:/...)
+    for (const char c : path) {
+        const auto u = static_cast<unsigned char>(c);
+        if (std::isalnum(u) || std::string_view("/:._-~").find(c) != std::string_view::npos) url += c;
+        else if (c == '\\') url += '/';
+        else {
+            char hex[4];
+            std::snprintf(hex, sizeof hex, "%%%02X", u);
+            url += hex;
+        }
+    }
+    return url;
+}
 
 // Whether `url` is an https:// address (the scheme in any case) with something after it and no spaces or control
 // characters: the only kind a page from the network may name for the system to open.

@@ -101,6 +101,7 @@
 #include "netplay.hpp"
 #include "net/compress.hpp"
 #include "net/update.hpp"
+#include "net/url.hpp"
 #include "one_board.hpp"
 #include "rollback.hpp"
 #include "delay_tuner.hpp"
@@ -3679,9 +3680,8 @@ int main(int argc, char** argv) {
                            }});
 #if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
         p.items.push_back({"Open its folder", "In the system's file manager.", {}, {}, [folder] {
-                               std::string url = folder;
-                               std::replace(url.begin(), url.end(), '\\', '/');
-                               SDL_OpenURL(((url.starts_with('/') ? "file://" : "file:///") + url).c_str());
+                               const std::string url = net::file_url(folder);
+                               if (!SDL_OpenURL(url.c_str())) std::printf("spikeout: can't open %s: %s\n", url.c_str(), SDL_GetError());
                            }});
 #endif
         p.items.push_back(back_item());
@@ -4015,18 +4015,7 @@ int main(int argc, char** argv) {
                            "Your settings, save states (saves), screenshots (screenshots), the logs, reports and the translated "
                            "game are kept in " + report_folder + ". Enter: open it.",
                            {}, {}, [&] {
-                               std::string url = "file://";
-                               if (!report_folder.empty() && report_folder[0] != '/') url += '/';
-                               for (const char c : report_folder) {
-                                   const auto u = static_cast<unsigned char>(c);
-                                   if (std::isalnum(u) || std::strchr("/:._-~", c)) url += c;
-                                   else if (c == '\\') url += '/';
-                                   else {
-                                       char hex[4];
-                                       std::snprintf(hex, sizeof hex, "%%%02X", u);
-                                       url += hex;
-                                   }
-                               }
+                               const std::string url = net::file_url(report_folder);
                                if (!SDL_OpenURL(url.c_str())) std::printf("spikeout: can't open %s: %s\n", url.c_str(), SDL_GetError());
                            }});
         if (net::report::available()) // (the same as Network play's: the question covers every problem since 2026-11-12)
