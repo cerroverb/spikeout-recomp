@@ -1,5 +1,6 @@
 #include "test.hpp"
 
+#include "net/compress.hpp"
 #include "net/digest.hpp"
 #include "net/session.hpp"
 #include "net/stun.hpp"
@@ -8,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -55,6 +57,44 @@ struct Seen {
         return changed.wait_for(g, std::chrono::milliseconds(ms), done);
     }
 };
+
+// A host made by hand, for what a joining session takes off the wire: its reliable channel's pieces as seat 0's,
+// each piece a whole message unless `flags` says otherwise (1: a message's first, 2: its last).
+struct HandHost {
+    UdpSocket socket;
+    uint64_t session = 0x5EED;
+    Address joiner;
+    HandHost() { CHECK(socket.open(0)); }
+    GameInfo game() const { return GameInfo{session, 42, "hand", 2, 1, false, Address{0x7F000001u, socket.port()}, {}}; }
+    void reliable(uint32_t seq, const std::vector<uint8_t>& message, uint8_t flags = 3) {
+        std::vector<uint8_t> d = {'S', 'K', kProtocol, 3}; // (kReliable)
+        auto put = [&d](uint64_t v, int bytes) {
+            for (int i = 0; i < bytes; ++i) d.push_back(static_cast<uint8_t>(v >> (8 * i)));
+        };
+        put(session, 8), d.push_back(0);                                       // (the session, from seat 0)
+        put(0, 4), put(0, 8), d.push_back(1), put(seq, 4), d.push_back(flags); // (nothing acknowledged; a piece)
+        d.insert(d.end(), message.begin(), message.end());
+        socket.send_to(joiner, d);
+    }
+};
+// Reliable messages (session.cpp's Message): a welcome to `seat` of `seats`, and the coming state's size (harmless
+// here: a filler).
+std::vector<uint8_t> welcome(uint8_t seat, uint8_t seats) { return {1, seat, seats, 0}; }
+const std::vector<uint8_t> kStateSizeMessage = {24, 0, 0, 0, 0};
+
+bool join_hand_host(Session& joiner, HandHost& h) {
+    if (!joiner.join(h.game(), "joiner")) return false;
+    h.joiner = Address{0x7F000001u, joiner.port()};
+    return true;
+}
+// What the host says, said again every 20 ms until the joiner is greeted (at most 3 s).
+bool greeted_after(const Session& joiner, const std::function<void()>& say) {
+    for (int i = 0; i < 150 && !joiner.greeted(); ++i) {
+        say();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return joiner.greeted();
+}
 
 } // namespace
 
@@ -386,4 +426,53 @@ TEST_CASE("net update: versions compared as the releases' tags, the newest newer
     CHECK(b.has_value() && b->version == "0.1.0" && b->page == "r010");
     CHECK(!newer_release(*list, "0.1.0").has_value());
     CHECK(!newer_release(*list, "0.1.1-preview1").has_value());
+}
+
+TEST_CASE("net session: a welcome to more seats than there can be is ignored, the next welcome taken") {
+    HandHost h;
+    Session joiner(Seen{}.callbacks(), 42);
+    CHECK(join_hand_host(joiner, h));
+    CHECK(greeted_after(joiner, [&] {
+        h.reliable(0, welcome(3, 200));
+        h.reliable(1, welcome(1, 2));
+    }));
+    using State = Session::SeatView::State;
+    CHECK(joiner.seats()[1].state == State::me);
+    CHECK(joiner.seats()[3].state == State::none);
+    CHECK_EQ(joiner.players().size(), 2u);
+}
+
+TEST_CASE("net session: a reliable piece beyond the window is dropped, not kept for when the pieces before it come") {
+    HandHost h;
+    Session joiner(Seen{}.callbacks(), 42);
+    CHECK(join_hand_host(joiner, h));
+    h.reliable(256, welcome(3, 4)); // (kWindow pieces on: no sender has it out yet)
+    CHECK(greeted_after(joiner, [&] {
+        for (uint32_t seq = 0; seq < 256; ++seq) h.reliable(seq, kStateSizeMessage);
+        h.reliable(256, welcome(1, 2));
+    }));
+    using State = Session::SeatView::State;
+    CHECK(joiner.seats()[1].state == State::me);
+    CHECK(joiner.seats()[3].state == State::none);
+}
+
+TEST_CASE("net session: a reliable piece bigger than a piece is dropped") {
+    HandHost h;
+    Session joiner(Seen{}.callbacks(), 42);
+    CHECK(join_hand_host(joiner, h));
+    std::vector<uint8_t> big = welcome(2, 4);
+    big.resize(1001); // (a byte over kFragment)
+    h.reliable(0, big);
+    CHECK(greeted_after(joiner, [&] { h.reliable(0, welcome(1, 2)); }));
+    using State = Session::SeatView::State;
+    CHECK(joiner.seats()[1].state == State::me);
+    CHECK(joiner.seats()[2].state == State::none);
+}
+
+TEST_CASE("net compress: a frame saying it unpacks to more than the caller allows isn't unpacked") {
+    const std::vector<uint8_t> data(1000, 0x42);
+    const std::vector<uint8_t> packed = compress(data);
+    CHECK(!decompress(packed, 999).has_value());
+    const auto unpacked = decompress(packed, 1000);
+    CHECK(unpacked.has_value() && *unpacked == data);
 }

@@ -470,7 +470,7 @@ inline uint64_t set_up_one_board(one_board::Game& game, const OneBoardSetUp& u) 
         auto packed = net->wait_board(static_cast<uint8_t>(seat), frame, std::chrono::seconds(30));
         if (!packed) return std::nullopt;
         const auto t1 = std::chrono::steady_clock::now();
-        auto board = one_board::unpack_remote(*packed, [](std::span<const uint8_t> d) { return ::net::decompress(d); });
+        auto board = one_board::unpack_remote(*packed, [](std::span<const uint8_t> d) { return ::net::decompress(d, kMaxBoardStateBytes); });
         const bool backup = board && board->state.empty();
         if (backup) { // ("my backup of that frame": from the copy kept here)
             auto copy = net->backup_at(static_cast<uint8_t>(seat), frame);

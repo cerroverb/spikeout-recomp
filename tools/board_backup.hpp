@@ -150,7 +150,7 @@ struct Copy {
     // A backup received (packed). False: changes from a backup this isn't (the whole wanted, Session::want_backup),
     // or not one.
     bool apply(std::span<const uint8_t> packed) {
-        const auto unpacked = net::decompress(packed);
+        const auto unpacked = net::decompress(packed, kMaxBoardStateBytes); // (a backup's regions are its board's state)
         if (!unpacked) return false;
         detail::In in{*unpacked};
         const uint8_t kind = in.u8();
@@ -158,6 +158,7 @@ struct Copy {
         const uint32_t n = in.u32();
         if (!in.ok) return false;
         if (kind == detail::kWhole) {
+            if (n > (in.b.size() - in.at) / 8) return false; // (each region its size at least)
             std::vector<std::vector<uint8_t>> rs(n);
             for (auto& r : rs) {
                 const uint64_t bytes = in.u64();

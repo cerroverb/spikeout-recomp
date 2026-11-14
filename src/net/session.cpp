@@ -25,6 +25,9 @@ using Clock = std::chrono::steady_clock;
 // 2026-11-07; each harmless twice)
 enum Type : uint8_t { kBeacon = 1, kJoin = 2, kReliable = 3, kInput = 4, kRefuse = 5, kPunch = 6, kGoodbye = 7, kNodeData = 8, kUrgent = 9 };
 constexpr uint8_t kNoSeat = 0xFF;
+// A game's seats as another machine says them (a welcome, the start, a beacon, the lobby): 1 to kMaxSeats, the size of
+// every array kept a seat, and `seat`, ours, one of them (kNoSeat: none, a spectator's or not let in yet).
+bool seats_fit(uint8_t seats, uint8_t seat) { return seats >= 1 && seats <= kMaxSeats && (seat == kNoSeat || seat < seats); }
 
 // Control messages, on the reliable channel.
 enum Message : uint8_t { kWelcome = 1, kRoster = 2, kStart = 3, kSuspect = 4, kHave = 5, kIdle = 6, kHash = 7, kBye = 8, kCabinet = 9,
@@ -45,6 +48,9 @@ constexpr auto kWatchInfoEvery = std::chrono::milliseconds(1000);
 
 constexpr std::size_t kFragment = 1000;    // reliable payload a datagram
 constexpr std::size_t kWindow = 256;       // reliable fragments in flight (a save state: some MB)
+// The longest reliable message taken: every board's state (kState: 4 boards of 29.1 MB unpacked, about 3-5 MB a board
+// packed, docs/netplay.md), which packing never makes bigger than unpacked.
+constexpr std::size_t kMaxMessage = std::size_t{128} << 20;
 constexpr uint64_t kTakeMargin = 8;        // frames ahead a cabinet is handed to the player taking it
 constexpr auto kResend = std::chrono::milliseconds(150);
 constexpr std::size_t kChunkFrames = 64;   // input frames a seat a datagram
@@ -143,6 +149,7 @@ struct Reliable {
     uint32_t rx_next = 0;
     std::map<uint32_t, std::pair<uint8_t, std::vector<uint8_t>>> early;
     std::vector<uint8_t> assembling;
+    bool oversized = false; // (the message being put together is past kMaxMessage: dropped whole)
     bool ack_due = false;
 
     void queue(const std::vector<uint8_t>& message) {
@@ -178,16 +185,22 @@ struct Reliable {
         }
         return bits;
     }
-    // A fragment in: the messages it completes, in order.
+    // A fragment in: the messages it completes, in order. (A sender has at most kWindow pieces from our rx_next out,
+    // each at most kFragment: anything else isn't kept.)
     std::vector<std::vector<uint8_t>> receive(uint32_t seq, uint8_t flags, std::vector<uint8_t> data) {
         std::vector<std::vector<uint8_t>> done;
         ack_due = true;
         if (static_cast<int32_t>(seq - rx_next) < 0) return done; // (seen)
+        if (seq - rx_next >= kWindow || data.size() > kFragment) return done;
         early[seq] = {flags, std::move(data)};
         for (auto it = early.find(rx_next); it != early.end(); it = early.find(rx_next)) {
-            if (it->second.first & 1) assembling.clear();
-            assembling.insert(assembling.end(), it->second.second.begin(), it->second.second.end());
-            if (it->second.first & 2) done.push_back(std::move(assembling)), assembling.clear();
+            if (it->second.first & 1) assembling.clear(), oversized = false;
+            if (assembling.size() + it->second.second.size() > kMaxMessage) assembling.clear(), oversized = true;
+            if (!oversized) assembling.insert(assembling.end(), it->second.second.begin(), it->second.second.end());
+            if (it->second.first & 2) {
+                if (!oversized) done.push_back(std::move(assembling));
+                assembling.clear(), oversized = false;
+            }
             early.erase(it);
             ++rx_next;
         }
@@ -1379,10 +1392,11 @@ struct Session::Impl {
         switch (r.u8()) {
         case kWelcome:
             if (my_seat == kNoSeat && !is_host) {
+                const uint8_t seat = r.u8(), n = r.u8();
+                const bool on = r.u8() != 0;
+                if (!r.ok() || seat == kNoSeat || !seats_fit(n, seat)) break;
                 host_seat = from; // (0, or whoever hosts the room now)
-                my_seat = r.u8();
-                seats = r.u8();
-                late = r.u8() != 0;
+                my_seat = seat, seats = n, late = on;
                 log("joined " + game_name + ", seat " + std::to_string(my_seat + 1) + (late ? " (the game in progress)" : ""));
                 Writer c; // our cabinet, for every machine to start our board from
                 c.u8(kCabinet), c.bytes(my_eeprom), c.bytes(my_backup);
@@ -1399,7 +1413,7 @@ struct Session::Impl {
             if (watch_mode && !is_host) {
                 const uint8_t id = r.u8(), n = r.u8();
                 const bool on = r.u8() != 0;
-                if (!r.ok() || id >= kMaxWatchers) break;
+                if (!r.ok() || id >= kMaxWatchers || !seats_fit(n, kNoSeat)) break;
                 if (my_watch == kNoSeat) {
                     my_watch = id, seats = n, late = on, host_seat = from;
                     watch_since = Clock::now(), watch_told = watch_since;
@@ -1447,6 +1461,7 @@ struct Session::Impl {
             if (from == host_seat && !is_host && !started) {
                 StartInfo info;
                 info.seats = r.u8();
+                if (!seats_fit(info.seats, my_seat)) break;
                 info.clock = static_cast<int64_t>(r.u64());
                 for (uint8_t s = 0; s < info.seats; ++s) {
                     info.names.push_back(r.str());
@@ -2042,6 +2057,10 @@ bool Session::join(const GameInfo& game, const std::string& name) {
     std::lock_guard guard(m.lock);
     if (game.build != m.build) {
         error_ = "a different game or build";
+        return false;
+    }
+    if (!seats_fit(game.seats, kNoSeat)) {
+        error_ = "a game of " + std::to_string(game.seats) + " cabinets";
         return false;
     }
     m.is_host = false;

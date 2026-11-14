@@ -3060,7 +3060,7 @@ int main(int argc, char** argv) {
                     static_cast<unsigned long long>(delay), one_way);
         std::vector<uint8_t> state; // (a game joined in progress: every board as the host had them)
         if (start.state_frame) {
-            if (auto unpacked = net::decompress(start.state)) state = std::move(*unpacked);
+            if (auto unpacked = net::decompress(start.state, tools::kMaxLinkedStateBytes)) state = std::move(*unpacked);
             else std::printf("spikeout: the host's state doesn't unpack\n");
         }
         reset_game([&] {
@@ -3103,7 +3103,7 @@ int main(int argc, char** argv) {
     // Ours out of step with the host's boards: every board again from its
     // state, the inputs since fed again, run unpaced until caught up.
     auto net_resync = [&](const net::StartInfo& again) {
-        auto unpacked = net::decompress(again.state);
+        auto unpacked = net::decompress(again.state, tools::kMaxLinkedStateBytes);
         if (!unpacked || !again.state_frame) return;
         watchdog.arm(false); // (the boards stopped and set up again: no frames meanwhile)
         reset_game([&] {

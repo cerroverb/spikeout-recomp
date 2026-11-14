@@ -146,6 +146,11 @@ private:
 // kStateFormat: raised whenever what board_state writes changes shape (a device's state, a section).
 // 2: widescreen's tile sides 26 columns a side (21:9), 12 before (format 1's still load: m3::TileSides::state).
 inline constexpr uint64_t kStateFormat = 2;
+// The most a packed state may unpack to (net::decompress: the size is the sender's or the file's to say): a board's
+// state is 29.1 MB with sound (docs/netplay.md, measured 2026-10-25), every board's (LinkedState) up to four of them;
+// twice that allowed, for devices' state to grow.
+inline constexpr std::size_t kMaxBoardStateBytes = std::size_t{64} << 20;
+inline constexpr std::size_t kMaxLinkedStateBytes = 4 * kMaxBoardStateBytes;
 inline uint64_t code_id() {
     static const uint64_t id = [] {
         uint64_t h = 0xCBF29CE484222325ull;

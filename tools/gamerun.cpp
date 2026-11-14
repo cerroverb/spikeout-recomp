@@ -501,7 +501,7 @@ using tools::LinkedState; // (tools/game_setup.hpp)
 std::vector<uint8_t> read_state_bytes(const char* path) {
     std::vector<uint8_t> bytes = tools::read_file(path);
     if (bytes.size() >= 4 && bytes[0] == 0x28 && bytes[1] == 0xB5 && bytes[2] == 0x2F && bytes[3] == 0xFD)
-        if (auto unpacked = net::decompress(bytes)) return std::move(*unpacked);
+        if (auto unpacked = net::decompress(bytes, tools::kMaxLinkedStateBytes)) return std::move(*unpacked);
     return bytes;
 }
 
@@ -4336,7 +4336,7 @@ int main(int argc_given, char** argv_given) {
             std::printf("net: playing seat %u of %u (board %u), clock %lld\n", start->my_seat + 1, start->seats,
                         start->my_seat, static_cast<long long>(start->clock));
         if (start->state_frame) { // a game joined in progress: every board as the host had them
-            auto state = net::decompress(start->state);
+            auto state = net::decompress(start->state, tools::kMaxLinkedStateBytes);
             if (!state) {
                 std::fprintf(stderr, "gamerun: the host's state doesn't unpack\n");
                 return 1;
@@ -4728,7 +4728,7 @@ int main(int argc_given, char** argv_given) {
     // again from its state, the inputs since fed again.
     const auto resync = netplay ? netplay->take_resync() : std::nullopt;
     if (!resync) break;
-    auto unpacked = net::decompress(resync->state);
+    auto unpacked = net::decompress(resync->state, tools::kMaxLinkedStateBytes);
     if (!unpacked) {
         std::fprintf(stderr, "gamerun: the host's state doesn't unpack\n");
         return 1;
