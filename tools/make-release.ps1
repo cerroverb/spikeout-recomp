@@ -63,6 +63,7 @@ $parts = @(
     @("QR Code generator, Project Nayuki (MIT)", "third_party\qrcodegen\LICENSE"),
     @("Monocypher (CC0 or BSD-2-Clause)", "third_party\monocypher\LICENCE.md"),
     @("Moira", "third_party\moira\LICENSE"),
+    @("MAME: the 315-5881 decrypter and the communication board (BSD-3-Clause)", "src\runtime\MAME-LICENSE.txt"),
     @("Barlow Condensed font (SIL Open Font License)", "assets\fonts\OFL.txt"),
     @("Country flags", "assets\ui\flags-LICENSE.txt"),
     @("SDL_GameControllerDB, controller layouts (zlib licence)", "assets\controllers\LICENSE.txt"))
