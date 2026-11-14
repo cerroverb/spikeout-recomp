@@ -111,6 +111,7 @@ int main(int argc, char** argv) {
             width = gpu3d.width(), height = gpu3d.height();
         } // (the renderer gone before the device)
 #else
+        (void)scale; // (the GPU renderer's)
         std::fprintf(stderr, "frame3d: built without the GPU renderer: --renderer software\n");
         return 1;
 #endif
