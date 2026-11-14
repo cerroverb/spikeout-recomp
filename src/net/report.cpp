@@ -1,6 +1,7 @@
 // A bug report to GitHub: src/net/report.hpp.
 #include "net/report.hpp"
 #include "net/ca_file.hpp"
+#include "net/curl_init.hpp"
 #include "net/json.hpp"
 #include "net/lobby.hpp" // (kLobbyUrl: uploads go to the lobby)
 
@@ -29,8 +30,7 @@ int cancelled(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) { return g_
 // bytes a second at most for the body (0: as fast as it goes), the time allowed grown to fit.
 Http request(const std::string& method, const std::string& url, const std::string& body, const std::string& type,
                const std::string& token, long max_send = 0) {
-    static const bool ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
-    (void)ready;
+    init_curl();
     Http a;
     CURL* c = curl_easy_init();
     if (!c) {

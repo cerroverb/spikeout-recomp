@@ -1,5 +1,6 @@
 #include "net/lobby.hpp"
 #include "net/ca_file.hpp"
+#include "net/curl_init.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -20,11 +21,6 @@ constexpr auto kKeepAlive = std::chrono::seconds(30);
 // The longest message taken from the lobby. Its longest is a page of the game list: 50 games (lobby/src/index.js,
 // LIST_PAGE), each under 500 bytes even with every name and session made of escaped characters.
 constexpr std::size_t kMaxIncoming = 64 * 1024;
-
-struct CurlGlobal {
-    CurlGlobal() { curl_global_init(CURL_GLOBAL_DEFAULT); }
-    ~CurlGlobal() { curl_global_cleanup(); }
-};
 
 // Until the socket has something to read (or room to write, `write`), or `ms` milliseconds.
 void wait_socket(curl_socket_t s, bool write, int ms) {
@@ -56,7 +52,7 @@ CURLcode send_text(CURL* c, curl_socket_t socket, const std::string& m, const st
 
 bool LobbyClient::available() { return true; }
 
-LobbyClient::LobbyClient() { static CurlGlobal global; }
+LobbyClient::LobbyClient() { init_curl(); }
 
 LobbyClient::~LobbyClient() {
     stop_ = true;

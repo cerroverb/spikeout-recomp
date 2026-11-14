@@ -2,6 +2,7 @@
 // through libcurl.
 #include "net/update.hpp"
 #include "net/ca_file.hpp"
+#include "net/curl_init.hpp"
 
 #include <cstdlib>
 #include <curl/curl.h>
@@ -31,8 +32,7 @@ UpdateCheck::~UpdateCheck() = default; // (the thread was detached: it holds its
 void UpdateCheck::start(std::string current, std::string url) {
     if (started_) return;
     started_ = true;
-    static const bool ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK; // (never cleaned up: a question may outlive main)
-    (void)ready;
+    init_curl();
     if (const char* e = std::getenv("SPIKEOUT_UPDATE_URL"); e && *e) url = e;
     if (url.empty()) url = SPIKEOUT_RELEASES_URL;
     std::thread(run, state_, std::move(current), std::move(url)).detach();
