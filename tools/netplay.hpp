@@ -672,7 +672,12 @@ inline bool lobby_join(net::LobbyClient& lobby, net::Session& session, uint64_t 
     game.session = std::strtoull((*joining)["session"].as_string().c_str(), nullptr, 16);
     game.build = build;
     game.name = (*joining)["name"].as_string();
-    game.seats = static_cast<uint8_t>((*joining)["seats"].as_number(2));
+    const double seats = (*joining)["seats"].as_number(2);
+    if (!(seats >= 2 && seats <= static_cast<double>(net::kMaxSeats))) {
+        error = "the lobby gave a game with a wrong number of cabinets";
+        return false;
+    }
+    game.seats = static_cast<uint8_t>(seats);
     game.candidates = parse_addresses((*joining)["candidates"]);
     if (!(watch ? session.watch(game, name) : session.join(game, name))) {
         error = session.error();
