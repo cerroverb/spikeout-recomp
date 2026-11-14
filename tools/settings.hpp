@@ -12,7 +12,9 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string>
@@ -128,6 +130,12 @@ inline std::string data_folder() {
     return path;
 }
 
+// A setting's number as std::atoi reads it, but defined for any text: a number past int's range ends at its ends.
+inline int setting_int(const std::string& text) {
+    constexpr long kLo = std::numeric_limits<int>::min(), kHi = std::numeric_limits<int>::max();
+    return static_cast<int>(std::clamp(std::strtol(text.c_str(), nullptr, 10), kLo, kHi));
+}
+
 inline Settings load_settings(const std::string& path) {
     Settings s;
     std::ifstream in(path);
@@ -144,7 +152,7 @@ inline Settings load_settings(const std::string& path) {
         v[trim(line.substr(0, eq))] = trim(line.substr(eq + 1));
     }
     auto get = [&](const char* key, int& out, int lo, int hi) {
-        if (auto it = v.find(key); it != v.end()) out = std::clamp(std::atoi(it->second.c_str()), lo, hi);
+        if (auto it = v.find(key); it != v.end()) out = std::clamp(setting_int(it->second), lo, hi);
     };
     auto get_bool = [&](const char* key, bool& out) {
         if (auto it = v.find(key); it != v.end()) out = it->second == "1" || it->second == "on" || it->second == "true";
@@ -179,7 +187,7 @@ inline Settings load_settings(const std::string& path) {
         if (auto it = v.find(pre); it != v.end()) s.pads[p] = it->second;
         for (std::size_t a = 0; a < kActions; ++a)
             if (auto it = v.find(pre + "_" + kActionKeys[a]); it != v.end()) {
-                const int code = std::atoi(it->second.c_str());
+                const int code = setting_int(it->second);
                 if (valid_pad_input(code)) s.pad_buttons[p][a] = code;
             }
     }
@@ -222,10 +230,19 @@ inline std::string settings_text(const Settings& s) {
     return o.str();
 }
 
+// Written beside the file, then renamed over it: a crash or a full disk mid-write leaves the old settings whole.
 inline bool save_settings(const std::string& path, const Settings& s) {
-    std::ofstream out(path, std::ios::trunc);
+    const std::string part = path + ".part";
+    std::ofstream out(part, std::ios::trunc);
     out << settings_text(s);
-    return static_cast<bool>(out);
+    out.close();
+    std::error_code ec;
+    if (out) std::filesystem::rename(part, path, ec);
+    if (!out || ec) {
+        std::filesystem::remove(part, ec);
+        return false;
+    }
+    return true;
 }
 
 // The settings that differ between two texts of them (settings_text), a line each: "key: old -> new" (the log: a
