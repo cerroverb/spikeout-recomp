@@ -22,7 +22,9 @@
 //   turn   {}                            -> turn {iceServers} (short-lived TURN credentials)
 //   "ping"                               -> "pong" (answered without waking the object)
 //
-// Errors: error {why}. Candidates are "ip:port" strings: the addresses a
+// Errors: error {why}. hello comes first (list, join, turn and host refused
+// before it). Each connection's messages are limited (LIMITS: a burst, then
+// a rate; join and turn more). Candidates are "ip:port" strings: the addresses a
 // machine can be reached at (its own on its networks, its public one as
 // STUN saw it); the lobby adds the address it sees the player at.
 // Games are listed only to players with the same build (the same game,
@@ -38,6 +40,7 @@ const MAX_MESSAGE = 4096;
 const MAX_CANDIDATES = 8;
 const LIST_PAGE = 50; // games a list message
 const ROOM_KEPT = 30 * 60 * 1000; // ms a game in progress is kept after its host goes, to take over
+const JOINED_KEPT = 4; // rooms a connection joined, remembered (one of them it may take over)
 
 export default {
 	async fetch(request, env) {
@@ -84,8 +87,10 @@ async function reportIn(request, env, url) {
 	if (request.method !== "POST") return new Response("POST only", { status: 405 });
 	const kind = url.pathname.slice("/v1/".length); // stats, problem, inputs
 	const version = text(url.searchParams.get("version"), 40);
-	const body = new Uint8Array(await request.arrayBuffer());
 	const locked = LOCKED[kind];
+	const declared = Number(request.headers.get("Content-Length")); // (refused before it is read; the game's always says)
+	if (declared > (locked ? locked.most : MAX_STATS)) return new Response("too big", { status: 413 });
+	const body = new Uint8Array(await request.arrayBuffer());
 	if (!locked) {
 		if (body.length === 0 || body.length > MAX_STATS) return new Response("too big", { status: 413 });
 		let parsed;
@@ -127,7 +132,8 @@ async function hashed(address) {
 
 async function admin(request, env, url) {
 	const token = (env.ADMIN_TOKEN || "").trim(); // (a secret typed or piped in may end in a line break)
-	if (!token || (request.headers.get("Authorization") || "").trim() !== `Bearer ${token}`) return new Response("not found", { status: 404 });
+	if (!token || !(await sameSecret((request.headers.get("Authorization") || "").trim(), `Bearer ${token}`)))
+		return new Response("not found", { status: 404 });
 	const db = env.REPORTS_DB.getByName("reports");
 	const after = Number(url.searchParams.get("after")) || 0;
 	if (url.pathname === "/v1/admin/stats") return Response.json(await db.stats(after, ADMIN_PAGE));
@@ -137,7 +143,13 @@ async function admin(request, env, url) {
 		return Response.json({ month: await db.month(), r2a: [await db.spent("r2a"), Number(env.REPORTS_A_MONTH) || R2_A_MONTH],
 			r2b: [await db.spent("r2b"), Number(env.REPORTS_B_MONTH) || R2_B_MONTH], stored: await db.stored(), kept: Number(env.REPORTS_KEPT) || KEPT });
 	if (url.pathname.startsWith("/v1/admin/file/") && env.REPORTS) {
-		const key = decodeURIComponent(url.pathname.slice("/v1/admin/file/".length));
+		let key;
+		try {
+			key = decodeURIComponent(url.pathname.slice("/v1/admin/file/".length));
+		} catch (e) {
+			if (!(e instanceof URIError)) throw e;
+			return new Response("not a file name", { status: 400 });
+		}
 		const ok = Object.values(LOCKED).some((l) => key.startsWith(l.folder + "/"));
 		if (ok && !(await db.spend("r2b", Number(env.REPORTS_B_MONTH) || R2_B_MONTH, 1))) return new Response("full for this month", { status: 503 });
 		const o = ok ? await env.REPORTS.get(key) : null;
@@ -145,6 +157,13 @@ async function admin(request, env, url) {
 		return new Response(o.body, { headers: { "Content-Type": "application/octet-stream" } });
 	}
 	return new Response("not found", { status: 404 });
+}
+
+// Whether two secrets are the same, in a time that doesn't tell how much of them was (both hashed: equal lengths).
+async function sameSecret(given, expected) {
+	const encoder = new TextEncoder();
+	const [a, b] = await Promise.all([given, expected].map((s) => crypto.subtle.digest("SHA-256", encoder.encode(s))));
+	return crypto.subtle.timingSafeEqual(a, b);
 }
 
 // What came: a database of its own (not the lobby's: its games' traffic never waits on it).
@@ -208,8 +227,12 @@ export class Reports extends DurableObject {
 	}
 }
 
+// A string from a player, at most `max` UTF-16 units: no control characters, no bidirectional overrides or isolates
+// (a name shown to others can't reorder what's around it), no surrogate left without its pair (nor one cut from it).
+const UNSHOWN = /[\u0000-\u001F\u007F-\u009F؜‎‏‪-‮⁦-⁩]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 function text(v, max) {
-	return typeof v === "string" ? v.slice(0, max) : "";
+	if (typeof v !== "string") return "";
+	return v.replace(UNSHOWN, "").slice(0, max).replace(/[\uD800-\uDBFF]$/, "");
 }
 
 // A listed game's speed for the player asking, estimated (no traffic to the host): the round trip, ms, from
@@ -224,13 +247,38 @@ function estimate(a, b) {
 	return Math.round(5 + (2 * km * 1.5) / 200);
 }
 
+// An address a machine can be sent to: four bytes and a port, not "this network" (0.x), multicast, reserved or broadcast
+// (224 and up). Loopback and private ones stay: the same machine and a LAN are reached by them.
+function reachable(c) {
+	const m = typeof c === "string" && /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(c);
+	if (!m) return false;
+	const [a, b, d, e, port] = m.slice(1).map(Number);
+	return a > 0 && a < 224 && b <= 255 && d <= 255 && e <= 255 && port > 0 && port <= 65535;
+}
+
 function candidates(list, seen) {
 	const out = [];
 	if (Array.isArray(list))
-		for (const c of list.slice(0, MAX_CANDIDATES))
-			if (typeof c === "string" && /^\d{1,3}(\.\d{1,3}){3}:\d{1,5}$/.test(c) && !out.includes(c)) out.push(c);
+		for (const c of list.slice(0, MAX_CANDIDATES)) if (reachable(c) && !out.includes(c)) out.push(c);
 	if (seen && !out.includes(seen)) out.push(seen);
 	return out;
+}
+
+// Each connection's allowance of messages of a kind: `burst` at once, then `perSecond` (kept in its attachment).
+// The game sends a list every few seconds at most, an update when its room changes, one join and one turn a connection.
+const LIMITS = {
+	message: { burst: 60, perSecond: 2, why: "too many messages" },
+	join: { burst: 10, perSecond: 1 / 10, why: "too many joins" },
+	turn: { burst: 3, perSecond: 1 / 60, why: "too many relay requests" },
+};
+
+function allowed(a, kind, now) {
+	const { burst, perSecond } = LIMITS[kind];
+	a.limits = a.limits || {};
+	const was = a.limits[kind] || { tokens: burst, at: now };
+	const tokens = Math.min(burst, was.tokens + ((now - was.at) / 1000) * perSecond);
+	a.limits[kind] = { tokens: tokens >= 1 ? tokens - 1 : tokens, at: now };
+	return tokens >= 1;
 }
 
 export class Lobby extends DurableObject {
@@ -282,6 +330,14 @@ export class Lobby extends DurableObject {
 		}
 		const a = ws.deserializeAttachment() || {};
 		const seen = a.ip && /^\d{1,3}(\.\d{1,3}){3}$/.test(a.ip) ? a.ip : ""; // (IPv4 only for now)
+		const spend = (kind) => {
+			const ok = allowed(a, kind, Date.now());
+			ws.serializeAttachment(a);
+			return ok;
+		};
+		if (!spend("message")) return send({ t: "error", why: LIMITS.message.why });
+		// (the game's hello goes first on every connection: net::LobbyClient::run, since the first release)
+		if ((m.t === "list" || m.t === "join" || m.t === "turn") && !a.build) return send({ t: "error", why: "say hello first" });
 
 		switch (m.t) {
 			case "hello":
@@ -338,12 +394,15 @@ export class Lobby extends DurableObject {
 					candidates: candidates(m.candidates, seen && port ? `${seen}:${port}` : ""),
 				};
 				// Taking over a room whose host left its game in progress (a player
-				// in it hosts it now): the same code, name, seats and listing, if the
-				// session is that room's (only its players know it) and it's free.
+				// in it hosts it now): the same code, name, seats and listing, if this
+				// connection joined that room (the game takes it over on the connection
+				// it joined with), the session is the room's and the code is free.
+				// (The session alone isn't enough: the list shows it to everyone.)
 				if (m.takeover) {
 					const code = text(m.takeover, CODE_LENGTH).toUpperCase();
 					const was = await this.ctx.storage.get(`room:${code}`);
 					if (was && was.until > Date.now() && was.build === a.build && was.session === session && session &&
+						(a.joined || []).includes(code) &&
 						!this.players().some((p) => p.a.game && p.a.game.code === code)) {
 						Object.assign(a.game, { code, name: was.name, seats: was.seats, public: was.public, created: was.created });
 						await this.ctx.storage.delete(`room:${code}`);
@@ -370,6 +429,7 @@ export class Lobby extends DurableObject {
 				return;
 
 			case "join": {
+				if (!spend("join")) return send({ t: "error", why: LIMITS.join.why });
 				const code = text(m.code, CODE_LENGTH).toUpperCase();
 				const host = this.findGame(code, a.build);
 				if (!host) {
@@ -383,21 +443,31 @@ export class Lobby extends DurableObject {
 				const port = Number(m.port) | 0;
 				const mine = candidates(m.candidates, seen && port ? `${seen}:${port}` : "");
 				host.ws.send(JSON.stringify({ t: "joiner", name: a.name, candidates: mine, country: a.country, watch: Boolean(m.watch) }));
+				a.joined = [code, ...(a.joined || []).filter((c) => c !== code)].slice(0, JOINED_KEPT); // (the rooms it may take over)
+				ws.serializeAttachment(a);
 				return send({ t: "joining", code, name: g.name, seats: g.seats, session: g.session, candidates: g.candidates, country: host.a.country });
 			}
 
 			case "turn": {
+				if (!spend("turn")) return send({ t: "error", why: LIMITS.turn.why });
 				if (!this.env.TURN_KEY_ID || !this.env.TURN_KEY_API_TOKEN) return send({ t: "error", why: "no relay here" });
-				const r = await fetch(
-					`https://rtc.live.cloudflare.com/v1/turn/keys/${this.env.TURN_KEY_ID}/credentials/generate-ice-servers`,
-					{
-						method: "POST",
-						headers: { Authorization: `Bearer ${this.env.TURN_KEY_API_TOKEN}`, "Content-Type": "application/json" },
-						body: JSON.stringify({ ttl: 86400 }),
-					},
-				);
+				let r, body;
+				try {
+					r = await fetch(
+						`https://rtc.live.cloudflare.com/v1/turn/keys/${this.env.TURN_KEY_ID}/credentials/generate-ice-servers`,
+						{
+							method: "POST",
+							headers: { Authorization: `Bearer ${this.env.TURN_KEY_API_TOKEN}`, "Content-Type": "application/json" },
+							body: JSON.stringify({ ttl: 86400 }),
+						},
+					);
+					if (r.ok) body = await r.json();
+				} catch (e) { // (Cloudflare's TURN service unreachable, or its answer not JSON: the game goes on without a relay)
+					if (!(e instanceof TypeError || e instanceof SyntaxError)) throw e;
+					console.error("relay:", e);
+					return send({ t: "error", why: "relay: no answer" });
+				}
 				if (!r.ok) return send({ t: "error", why: `relay: ${r.status}` });
-				const body = await r.json();
 				return send({ t: "turn", iceServers: body.iceServers });
 			}
 

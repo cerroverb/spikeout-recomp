@@ -194,6 +194,11 @@ test("a game in progress whose host goes: a player of it takes it over under its
 	await host.next("welcome");
 	host.send({ t: "host", name: "Ann's room", seats: 3, public: true, session: "s3ss10n", port: 1, candidates: [] });
 	const { code } = await host.next("hosted");
+	const bo = await player(); // a player of it (joined on this connection, as the game does)
+	bo.send({ t: "hello", build: "takeover", name: "Bo" });
+	await bo.next("welcome");
+	bo.send({ t: "join", code, port: 1, candidates: [] });
+	await bo.next("joining");
 	host.send({ t: "update", taken: 2, started: true });
 	await new Promise((r) => setTimeout(r, 100));
 	host.close(); // (gone: the room remembered)
@@ -204,11 +209,13 @@ test("a game in progress whose host goes: a player of it takes it over under its
 	await stranger.next("welcome");
 	stranger.send({ t: "host", name: "Cy", seats: 2, session: "other", takeover: code, port: 1, candidates: [] });
 	assert.notEqual((await stranger.next("hosted")).code, code);
+	const lister = await player(); // (the room's session, as the list shows it, but never joined it: refused too)
+	lister.send({ t: "hello", build: "takeover", name: "Di" });
+	await lister.next("welcome");
+	lister.send({ t: "host", name: "Di", seats: 2, session: "s3ss10n", takeover: code, port: 1, candidates: [] });
+	assert.notEqual((await lister.next("hosted")).code, code);
 
-	const bo = await player(); // a player of it, hosting it now
-	bo.send({ t: "hello", build: "takeover", name: "Bo" });
-	await bo.next("welcome");
-	bo.send({ t: "host", name: "Bo", seats: 2, session: "s3ss10n", takeover: code, port: 1, candidates: [] });
+	bo.send({ t: "host", name: "Bo", seats: 2, session: "s3ss10n", takeover: code, port: 1, candidates: [] }); // hosting it now
 	assert.equal((await bo.next("hosted")).code, code);
 	bo.send({ t: "update", taken: 1, started: true });
 	const guest = await player();
@@ -221,7 +228,81 @@ test("a game in progress whose host goes: a player of it takes it over under its
 	assert.equal(g.seats, 3);
 	guest.send({ t: "join", code, port: 1, candidates: [] });
 	assert.equal((await guest.next("joining")).session, "s3ss10n");
-	for (const p of [stranger, bo, guest]) p.close();
+	for (const p of [stranger, lister, bo, guest]) p.close();
+});
+
+test("list, join and turn only after hello", async () => {
+	const early = await player();
+	for (const t of ["list", "join", "turn"]) {
+		early.send({ t, code: "ZZZZZZ", port: 1, candidates: [] });
+		assert.equal((await early.next("error")).why, "say hello first");
+	}
+	early.close();
+});
+
+test("a joiner's addresses: only ones it can be reached at (no broadcast, multicast, reserved or 0.x), eight at most", async () => {
+	const host = await player();
+	host.send({ t: "hello", build: "addresses", name: "Ann" });
+	await host.next("welcome");
+	host.send({ t: "host", name: "Ann", seats: 2, session: "s", port: 1, candidates: [] });
+	const { code } = await host.next("hosted");
+	const guest = await player();
+	guest.send({ t: "hello", build: "addresses", name: "Bo" });
+	await guest.next("welcome");
+	const bad = ["0.0.0.0:47100", "255.255.255.255:47100", "224.0.0.1:47100", "240.1.2.3:47100", "300.1.1.1:47100", "10.0.0.8:0", "10.0.0.8:70000"];
+	guest.send({ t: "join", code, port: 47100, candidates: [...bad, "127.0.0.1:47100"] });
+	await guest.next("joining");
+	const joiner = await host.next("joiner");
+	for (const c of bad) assert.ok(!joiner.candidates.includes(c), c);
+	assert.ok(joiner.candidates.includes("127.0.0.1:47100")); // (loopback stays: the same machine)
+	const many = Array.from({ length: 20 }, (_, i) => `10.0.1.${i + 1}:47100`);
+	guest.send({ t: "join", code, port: 0, candidates: many });
+	await guest.next("joining");
+	assert.deepEqual((await host.next("joiner")).candidates, many.slice(0, 8));
+	for (const p of [host, guest]) p.close();
+});
+
+test("names: no control characters or direction overrides, and no character cut in two", async () => {
+	const host = await player();
+	host.send({ t: "hello", build: "names", name: "‮evil\u0007⁦Bo" });
+	await host.next("welcome");
+	host.send({ t: "host", name: "x".repeat(31) + "\u{1F600}", seats: 2, session: "s", port: 1, candidates: [] }); // (33 units: the pair at 32)
+	const { code } = await host.next("hosted");
+	const guest = await player();
+	guest.send({ t: "hello", build: "names", name: "Cy\u0000\uD800" });
+	await guest.next("welcome");
+	guest.send({ t: "list" });
+	assert.equal((await guest.next("games")).games[0].name, "x".repeat(31));
+	guest.send({ t: "join", code, port: 1, candidates: [] });
+	await guest.next("joining");
+	assert.equal((await host.next("joiner")).name, "Cy");
+	host.send({ t: "unhost" });
+	host.send({ t: "host", name: "", seats: 2, session: "s", port: 1, candidates: [] }); // (no name: the player's)
+	await host.next("hosted");
+	guest.send({ t: "list" });
+	assert.equal((await guest.next("games")).games[0].name, "evilBo");
+	for (const p of [host, guest]) p.close();
+});
+
+test("each connection's messages limited: joins, relay requests, and all of them", async () => {
+	const p = await player();
+	p.send({ t: "hello", build: "limits", name: "Ed" });
+	await p.next("welcome");
+	const whys = async (n, m) => {
+		const out = [];
+		for (let i = 0; i < n; ++i) {
+			p.send(m);
+			out.push((await p.next("error")).why);
+		}
+		return out;
+	};
+	assert.deepEqual(await whys(11, { t: "join", code: "ZZZZZZ", port: 1, candidates: [] }), [...Array(10).fill("no game with that code"), "too many joins"]);
+	assert.deepEqual(await whys(4, { t: "turn" }), [...Array(3).fill("no relay here"), "too many relay requests"]); // (no key here)
+	const rest = await whys(50, { t: "nonsense" }); // (60 at once, 2 a second more: 16 sent above, then these)
+	const limited = rest.filter((w) => w === "too many messages").length;
+	assert.ok(limited >= 1 && limited <= 6, `${limited} limited`);
+	assert.equal(rest.at(-1), "too many messages");
+	p.close();
 });
 
 // Reports sent by the game itself (src/index.js): numbers as JSON, problem bundles only locked, the owner's list behind a
@@ -263,6 +344,17 @@ test("reports: a problem bundle kept only locked, and fetched back whole", async
 	const got = new Uint8Array(await (await fetch(`${BASE}/v1/admin/file/${encodeURIComponent(list.at(-1).key)}`, { headers: ADMIN })).arrayBuffer());
 	assert.deepEqual(got, locked);
 	assert.equal((await fetch(`${BASE}/v1/admin/file/${encodeURIComponent(list.at(-1).key)}`)).status, 404);
+	assert.equal((await fetch(`${BASE}/v1/admin/file/problems%2F%E0%A4%A`, { headers: ADMIN })).status, 400); // (a broken escape)
+});
+
+test("reports: a body said to be too big refused by its length, before it is read", async () => {
+	// (wrangler dev takes the whole body before the Worker answers, so it's all sent here; "too big" is the length's
+	// answer, "wrong size" the one after reading)
+	const big = new Uint8Array((24 << 20) + 1);
+	big.set(new TextEncoder().encode("SPKLOCK1"));
+	const r = await fetch(`${BASE}/v1/problem?version=test`, { method: "POST", body: big });
+	assert.equal(r.status, 413);
+	assert.equal(await r.text(), "too big");
 });
 
 test("reports: one address's day limited", async () => {
