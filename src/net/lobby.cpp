@@ -1,6 +1,7 @@
 #include "net/lobby.hpp"
 #include "net/ca_file.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <curl/curl.h>
 #include <vector>
@@ -22,15 +23,30 @@ struct CurlGlobal {
     ~CurlGlobal() { curl_global_cleanup(); }
 };
 
-// Until the socket has something to read, or `ms` milliseconds.
-void wait_readable(curl_socket_t s, int ms) {
+// Until the socket has something to read (or room to write, `write`), or `ms` milliseconds.
+void wait_socket(curl_socket_t s, bool write, int ms) {
 #ifdef _WIN32
-    WSAPOLLFD p{s, POLLRDNORM, 0};
+    WSAPOLLFD p{s, static_cast<SHORT>(write ? POLLWRNORM : POLLRDNORM), 0};
     WSAPoll(&p, 1, ms);
 #else
-    pollfd p{s, POLLIN, 0};
+    pollfd p{s, static_cast<short>(write ? POLLOUT : POLLIN), 0};
     ::poll(&p, 1, ms);
 #endif
+}
+
+// One whole text message: curl_ws_send may take only part of it, or none yet (CURLE_AGAIN), and is then given the
+// rest. Gives up (CURLE_AGAIN) only once `stop` is set.
+CURLcode send_text(CURL* c, curl_socket_t socket, const std::string& m, const std::atomic<bool>& stop) {
+    std::size_t done = 0;
+    for (;;) {
+        std::size_t sent = 0;
+        const CURLcode r = curl_ws_send(c, m.data() + done, m.size() - done, &sent, 0, CURLWS_TEXT);
+        done += sent;
+        if (r == CURLE_OK && done == m.size()) return CURLE_OK;
+        if (r != CURLE_OK && r != CURLE_AGAIN) return r;
+        if (stop) return CURLE_AGAIN;
+        if (r == CURLE_AGAIN) wait_socket(socket, true, 20);
+    }
 }
 
 } // namespace
@@ -125,8 +141,7 @@ void LobbyClient::run(std::string url, std::string hello) {
         }
         if (out.empty() && std::chrono::steady_clock::now() - last_sent > kKeepAlive) out.push_back("ping");
         for (const std::string& m : out) {
-            std::size_t sent = 0;
-            const CURLcode r = curl_ws_send(c, m.data(), m.size(), &sent, 0, CURLWS_TEXT);
+            const CURLcode r = send_text(c, socket, m, stop_);
             if (r != CURLE_OK && r != CURLE_AGAIN) {
                 curl_easy_cleanup(c);
                 return fail(std::string("the lobby: ") + curl_easy_strerror(r));
@@ -159,7 +174,7 @@ void LobbyClient::run(std::string url, std::string hello) {
             }
             frame.clear();
         }
-        wait_readable(socket, 20);
+        wait_socket(socket, false, 20);
     }
     std::size_t ignored = 0;
     curl_ws_send(c, "", 0, &ignored, 0, CURLWS_CLOSE);
