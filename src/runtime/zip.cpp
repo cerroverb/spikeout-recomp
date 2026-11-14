@@ -210,8 +210,12 @@ struct Inflater {
             if (in_pos >= in_size) throw Bad{};
             return in[in_pos++];
         };
-        const std::size_t len = byte() | byte() << 8;
-        const std::size_t nlen = byte() | byte() << 8;
+        auto word = [&]() -> std::size_t { // (low byte first: two statements, so read in order)
+            const std::size_t low = byte();
+            return low | byte() << 8;
+        };
+        const std::size_t len = word();
+        const std::size_t nlen = word();
         if (len != (~nlen & 0xFFFF)) throw Bad{};
         if (len > out_size - out_pos) throw Bad{};
         for (std::size_t i = 0; i < len; ++i) out[out_pos++] = static_cast<uint8_t>(byte());
