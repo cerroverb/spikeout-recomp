@@ -17,6 +17,9 @@ namespace net {
 namespace {
 
 constexpr auto kKeepAlive = std::chrono::seconds(30);
+// The longest message taken from the lobby. Its longest is a page of the game list: 50 games (lobby/src/index.js,
+// LIST_PAGE), each under 500 bytes even with every name and session made of escaped characters.
+constexpr std::size_t kMaxIncoming = 64 * 1024;
 
 struct CurlGlobal {
     CurlGlobal() { curl_global_init(CURL_GLOBAL_DEFAULT); }
@@ -161,6 +164,10 @@ void LobbyClient::run(std::string url, std::string hello) {
             if (meta && (meta->flags & CURLWS_CLOSE)) {
                 curl_easy_cleanup(c);
                 return fail("the lobby closed the connection");
+            }
+            if (frame.size() + got > kMaxIncoming) {
+                curl_easy_cleanup(c);
+                return fail("the lobby sent a message over " + std::to_string(kMaxIncoming) + " bytes");
             }
             frame.append(buffer.data(), got);
             if (!meta || meta->bytesleft > 0 || (meta->flags & CURLWS_CONT)) continue;
