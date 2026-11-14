@@ -3778,7 +3778,7 @@ int main(int argc, char** argv) {
                         say("Can't log in: " + why);
                         break;
                     }
-                    if (std::FILE* f = tools::report::detail::open(login_file, "wb")) {
+                    if (std::FILE* f = tools::report::detail::open_private(login_file)) {
                         std::fprintf(f, "%s\n%s\n", name.c_str(), poll.token.c_str());
                         std::fclose(f);
                     }

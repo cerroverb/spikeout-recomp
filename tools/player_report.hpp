@@ -32,6 +32,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 #endif
@@ -74,6 +75,19 @@ inline std::FILE* open(const std::string& path, const char* mode) {
     return _wfopen(utf8(path).wstring().c_str(), wmode.c_str());
 #else
     return std::fopen(path.c_str(), mode);
+#endif
+}
+// A file to write that only its owner may read (a login's token): on POSIX mode 0600 before anything is in it, an
+// older file's mode too; Windows' user folders are their user's already.
+inline std::FILE* open_private(const std::string& path) {
+#ifdef _WIN32
+    return open(path, "wb");
+#else
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return nullptr;
+    std::FILE* f = ::fchmod(fd, 0600) == 0 ? ::fdopen(fd, "wb") : nullptr;
+    if (!f) ::close(fd);
+    return f;
 #endif
 }
 struct Log {
