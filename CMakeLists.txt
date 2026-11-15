@@ -90,7 +90,8 @@ target_link_libraries(m3runtime PUBLIC ppc PRIVATE moira minimp3 spikeout_warnin
 # tools/make-release.ps1 checks); any other build ends in -dev and never checks.
 set(SPIKEOUT_VERSION "${PROJECT_VERSION}-dev" CACHE STRING "This build's version (a release: its tag without the v)")
 set(SPIKEOUT_RELEASES_URL "https://api.github.com/repos/tastyrepublic/spikeout-recomp/releases?per_page=30" CACHE STRING "The releases checked for a newer version (GitHub's API)")
-add_library(m3net src/net/udp.cpp src/net/session.cpp src/net/stun.cpp src/net/digest.cpp src/net/compress.cpp src/net/update_versions.cpp)
+add_library(m3net src/net/udp.cpp src/net/session.cpp src/net/stun.cpp src/net/digest.cpp src/net/compress.cpp src/net/update_versions.cpp
+    src/net/secure_random.cpp)
 target_include_directories(m3net PUBLIC src)
 target_compile_definitions(m3net PUBLIC SPIKEOUT_VERSION="${SPIKEOUT_VERSION}")
 target_link_libraries(m3net PRIVATE spikeout_warnings)
@@ -131,7 +132,7 @@ else()
 endif()
 target_link_libraries(m3net PUBLIC monocypher)
 if(WIN32)
-    target_link_libraries(m3net PUBLIC bcrypt) # (BCryptGenRandom: the lock's random bytes)
+    target_link_libraries(m3net PUBLIC bcrypt) # (BCryptGenRandom: src/net/secure_random.cpp)
 endif()
 
 # The internet lobby's client (src/net/lobby.cpp): a WebSocket over TLS to

@@ -1,6 +1,7 @@
 #include "net/session.hpp"
 
 #include "net/event_log.hpp"
+#include "net/secure_random.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <deque>
 #include <random>
+#include <stdexcept>
 
 namespace net {
 
@@ -15,7 +17,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// Every datagram: "SK", the protocol, its type, the session, the sender's seat (13 bytes).
+// Every datagram: "SK", the protocol, its type, the session, the sender's seat (13 bytes); a seat's own traffic (every
+// type but kBeacon, kJoin, kRefuse and kPunch) then the sender's secret (8 bytes: its welcome's; 0 for none yet).
 // (kGoodbye: a player leaving, as a datagram of its own too, sent beside the reliable goodbye. In an internet test
 // (2026-11-06) a one-board player's reliable goodbye, sent in one burst as it quit, never came (2 pieces queued, so
 // not its window), and the others held kDropInGame for it; with this datagram too it came. A build without it
@@ -123,6 +126,11 @@ private:
 Writer header(Type type, uint64_t session, uint8_t from) {
     Writer w;
     w.u8('S'), w.u8('K'), w.u8(kProtocol), w.u8(type), w.u64(session), w.u8(from);
+    return w;
+}
+Writer traffic_header(Type type, uint64_t session, uint8_t from, uint64_t secret) {
+    Writer w = header(type, session, from);
+    w.u64(secret);
     return w;
 }
 
@@ -236,6 +244,18 @@ struct Session::Impl {
     uint8_t host_seat = 0;
     bool room_closed = false; // (a joiner: the host left before the game started)
     uint64_t session = 0;
+    // This seat's secret (the host makes each seat's, given in its welcome; the roster tells every player all of them):
+    // a datagram from an address a seat isn't known at counts only with that seat's (the session id is no secret: LAN
+    // beacons and the lobby's list give it, and any seat number can be claimed).
+    uint64_t my_secret = 0;
+    static uint64_t new_secret() {
+        uint64_t s = 0;
+        while (s == 0) // (0: none known)
+            if (!random_bytes(reinterpret_cast<uint8_t*>(&s), sizeof s))
+                throw std::runtime_error("net: the system gave no random bytes for a seat's secret");
+        return s;
+    }
+    Writer traffic(Type type, uint8_t from) const { return traffic_header(type, session, from, my_secret); }
     std::string game_name, my_name;
     std::string my_country; // (the lobby's two letters for this player, Session::set_country; "" none)
     Session::Status my_status;            // (set_status: sent as it changes and every kStatusEvery)
@@ -288,6 +308,7 @@ struct Session::Impl {
         bool connected = false; // heard from, not dropped
         bool dropped = false;
         Address address;
+        uint64_t secret = 0; // (its welcome's, from the roster; 0: not known)
         std::string name, country;
         uint64_t player = 0;
         bool cabinet = false; // (the host: its cabinet in, as it was)
@@ -593,7 +614,7 @@ struct Session::Impl {
     // (a drop's message: reliable, and three datagrams of its own that no queued piece holds back)
     void send_urgent(uint8_t seat, const std::vector<uint8_t>& message) {
         send_reliable(seat, message);
-        Writer w = header(kUrgent, session, me());
+        Writer w = traffic(kUrgent, me());
         w.bytes(message);
         for (int k = 0; k < 3; ++k) send_peer(peers[seat], w);
     }
@@ -684,7 +705,7 @@ struct Session::Impl {
                 break;
             }
             if constexpr (requires { p.resent; }) ++(f.ever_sent ? p.resent : p.sent);
-            Writer w = header(kReliable, session, me());
+            Writer w = traffic(kReliable, me());
             w.u32(p.rel.rx_next), w.u64(p.rel.sack_bits()), w.u8(1), w.u32(f.seq), w.u8(f.flags);
             w.out.insert(w.out.end(), f.data.begin(), f.data.end());
             send_peer(p, w);
@@ -692,7 +713,7 @@ struct Session::Impl {
             sent_any = true;
         }
         if (p.rel.ack_due && !sent_any) {
-            Writer w = header(kReliable, session, me());
+            Writer w = traffic(kReliable, me());
             w.u32(p.rel.rx_next), w.u64(p.rel.sack_bits()), w.u8(0);
             send_peer(p, w);
         }
@@ -702,7 +723,7 @@ struct Session::Impl {
 
     // Inputs: every seat's frames this peer hasn't acknowledged (to seat `to`).
     void send_inputs(uint8_t to, Peer& p) {
-        Writer w = header(kInput, session, my_seat);
+        Writer w = traffic(kInput, my_seat);
         const auto now = Clock::now();
         const uint32_t held = p.their_time_at == Clock::time_point{} ? 0 :
             static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - p.their_time_at).count());
@@ -757,7 +778,7 @@ struct Session::Impl {
     // The host to a spectator: every seat's frames it hasn't acknowledged (as far as the host has them: each seat's
     // are only those every player has had, since the host's own go out as they're set).
     void send_watch_inputs(Watcher& v) {
-        Writer w = header(kInput, session, my_seat);
+        Writer w = traffic(kInput, my_seat);
         const auto now = Clock::now();
         const uint32_t held = v.their_time_at == Clock::time_point{} ? 0 :
             static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - v.their_time_at).count());
@@ -877,7 +898,7 @@ struct Session::Impl {
     // A spectator to the host: how far it has each seat (the host sends on from there), and its time (round trips).
     void send_watch_acks() {
         Peer& h = peers[host_seat];
-        Writer w = header(kInput, session, me());
+        Writer w = traffic(kInput, me());
         const auto now = Clock::now();
         const uint32_t held = h.their_time_at == Clock::time_point{} ? 0 :
             static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - h.their_time_at).count());
@@ -954,7 +975,7 @@ struct Session::Impl {
         for (const Address& a : v.candidates) permit(a);
         log(name + " is watching" + (started ? " (the game in progress)" : ""));
         Writer w;
-        w.u8(kWatchWelcome), w.u8(id), w.u8(seats), w.u8(started ? 1 : 0);
+        w.u8(kWatchWelcome), w.u8(id), w.u8(seats), w.u8(started ? 1 : 0), w.u64(my_secret);
         v.rel.queue(w.out);
         if (started) { // the start as it was, then every board as it is now (Callbacks::state_wanted)
             v.rel.queue(start_message(start_info));
@@ -1106,7 +1127,7 @@ struct Session::Impl {
             v.acks.fill(UINT64_MAX); // (nothing sent until it says how far it is)
             for (const Address& a : k.where) permit(a);
             Writer w;
-            w.u8(kWatchWelcome), w.u8(k.id), w.u8(seats), w.u8(1);
+            w.u8(kWatchWelcome), w.u8(k.id), w.u8(seats), w.u8(1), w.u64(my_secret);
             v.rel.queue(w.out);
             log(k.name + " goes on watching, through this machine");
         }
@@ -1138,6 +1159,7 @@ struct Session::Impl {
             w.u8(present ? 1 : 0);
             w.str(s == my_seat ? my_name : peers[s].name);
             w.str(s == my_seat ? my_country : peers[s].country);
+            w.u64(s == my_seat ? my_secret : peers[s].secret);
             std::vector<Address> where;
             if (s != my_seat && present) {
                 where.push_back(Address{peers[s].address.ip, peers[s].address.port}); // (as we see it)
@@ -1150,6 +1172,12 @@ struct Session::Impl {
     }
 
     // ---- Receiving ----
+
+    // (a joiner: an address the host was said to be at)
+    bool from_host_address(const Address& a) const {
+        return a.same_place(host_address) ||
+               std::any_of(host_candidates.begin(), host_candidates.end(), [&](const Address& c) { return c.same_place(a); });
+    }
 
     void received(const UdpSocket::Datagram& d) {
         // STUN and TURN: our router's address, and what the relay passes on.
@@ -1188,12 +1216,14 @@ struct Session::Impl {
             return;
         }
         if (type == kRefuse) {
-            if (!is_host && sess == session && my_seat == kNoSeat) {
+            if (!is_host && sess == session && my_seat == kNoSeat && from_host_address(d.from)) {
                 log("the host refused: " + r.str());
                 leaving = true;
             }
             return;
         }
+        const uint64_t their_secret = r.u64();
+        if (!r.ok()) return;
         if (from >= kWatcherBase && from < kWatcherBase + kMaxWatchers) { // (a spectator's: the host's, or a backup channel's)
             if (sess != session) return;
             if (is_host) on_watcher(static_cast<uint8_t>(from - kWatcherBase), d, r, type);
@@ -1216,6 +1246,9 @@ struct Session::Impl {
             p.present = true, p.connected = true, p.address = d.from;
             p.candidates = host_candidates;
         }
+        // From somewhere else than we know it at: only with its secret (a router may move it, the relay or a direct
+        // path may carry it; anyone may claim its seat).
+        if (p.secret && !d.from.same_place(p.address) && their_secret != p.secret) return;
         // Where it answers from is where to send (a router may move it);
         // straight to it rather than through our relay, once that works.
         const auto now = Clock::now();
@@ -1267,13 +1300,14 @@ struct Session::Impl {
         said_bye[seat] = false, gone_name[seat].clear();
         p.present = p.connected = true;
         p.address = from, p.name = name, p.country = country, p.player = player, p.heard = Clock::now();
+        p.secret = new_secret();
         p.reached = true, p.direct_heard = from.relayed ? Clock::time_point{} : p.heard;
         p.candidates = std::move(where);
         permit(from);
         for (const Address& a : p.candidates) permit(a);
         log(name + " joined, seat " + std::to_string(seat + 1) + (started ? " (the game in progress)" : ""));
         Writer w;
-        w.u8(kWelcome), w.u8(seat), w.u8(seats), w.u8(started ? 1 : 0);
+        w.u8(kWelcome), w.u8(seat), w.u8(seats), w.u8(started ? 1 : 0), w.u64(p.secret);
         send_reliable(seat, w.out);
         send_all(roster_message());
         if (started) { // the start as it was, then every board as it is now (Callbacks::state_wanted)
@@ -1383,6 +1417,7 @@ struct Session::Impl {
                 my_seat = r.u8();
                 seats = r.u8();
                 late = r.u8() != 0;
+                my_secret = r.u64();
                 log("joined " + game_name + ", seat " + std::to_string(my_seat + 1) + (late ? " (the game in progress)" : ""));
                 Writer c; // our cabinet, for every machine to start our board from
                 c.u8(kCabinet), c.bytes(my_eeprom), c.bytes(my_backup);
@@ -1399,6 +1434,7 @@ struct Session::Impl {
             if (watch_mode && !is_host) {
                 const uint8_t id = r.u8(), n = r.u8();
                 const bool on = r.u8() != 0;
+                const uint64_t host_secret = r.u64();
                 if (!r.ok() || id >= kMaxWatchers) break;
                 if (my_watch == kNoSeat) {
                     my_watch = id, seats = n, late = on, host_seat = from;
@@ -1410,6 +1446,7 @@ struct Session::Impl {
                     host_seat = from, my_watch = id;
                 }
                 peers[from].present = peers[from].connected = true;
+                peers[from].secret = host_secret;
                 watch_acked = Clock::time_point{}; // (how far we are, at once)
             }
             break;
@@ -1425,16 +1462,17 @@ struct Session::Impl {
                 for (uint8_t s = 0; s < n && s < kMaxSeats && r.ok(); ++s) {
                     const bool present = r.u8() != 0;
                     const std::string name = r.str(), country = r.str();
+                    const uint64_t secret = r.u64();
                     std::vector<Address> where = get_addresses(r);
                     if (s == my_seat || s == host_seat) {
-                        if (s == host_seat) peers[host_seat].name = name, peers[host_seat].country = country;
+                        if (s == host_seat) peers[host_seat].name = name, peers[host_seat].country = country, peers[host_seat].secret = secret;
                         continue;
                     }
                     Peer& p = peers[s];
                     if (p.dropped && !(present && cabinets[s].open)) continue;
                     if (p.dropped) p = Peer{}; // (a new player in a cabinet whose player dropped)
                     const bool was = p.present;
-                    p.present = present && !where.empty(), p.name = name, p.country = country;
+                    p.present = present && !where.empty(), p.name = name, p.country = country, p.secret = secret;
                     if (p.present && !p.reached) p.address = where.front();
                     if (started && p.present && !was) p.connected = true, p.heard = Clock::now(); // (joined in progress)
                     if (p.present && !was) said_bye[s] = false, gone_name[s].clear();
@@ -1490,7 +1528,8 @@ struct Session::Impl {
             }
             break;
         }
-        case kWantState: // (out of step: our boards' state wanted)
+        case kWantState: // (out of step: our boards' state wanted; asked only of the authority, out_of_step)
+            if (authority() != my_seat) break;
             peers[from].wants_state = true;
             if (cb.state_wanted) cb.state_wanted();
             break;
@@ -1555,7 +1594,7 @@ struct Session::Impl {
         case kTaken: {
             const uint8_t s = r.u8();
             const uint64_t x = r.u64();
-            if (r.ok() && s < seats) taken(s, x);
+            if (r.ok() && s < seats && from == authority()) taken(s, x); // (only the authority hands cabinets over)
             break;
         }
         case kSuspect: {
@@ -1577,7 +1616,8 @@ struct Session::Impl {
         case kIdle: {
             const uint8_t s = r.u8();
             const uint64_t frame = r.u64();
-            if (r.ok() && s < seats && s != my_seat) set_idle(s, frame);
+            // (only the authority settles a drop: the host, or for the host's own drop whoever comes after it)
+            if (r.ok() && s < seats && s != my_seat && from == authority(s)) set_idle(s, frame);
             break;
         }
         case kHash: {
@@ -1740,9 +1780,10 @@ struct Session::Impl {
     // over: the room's host while it's there; else the lowest seat still
     // connected, leaving out a player who joined the game in progress and
     // hasn't its cabinet yet (it isn't running the game with the others).
-    uint8_t authority() const {
+    // `gone`: as if that seat's player had dropped already (who announces its drop).
+    uint8_t authority(uint8_t gone = kNoSeat) const {
         auto connected = [&](uint8_t s) {
-            return s == my_seat || (peers[s].present && peers[s].connected && !drops[s].suspected);
+            return s != gone && (s == my_seat || (peers[s].present && peers[s].connected && !drops[s].suspected));
         };
         if (host_seat < seats && connected(host_seat)) return host_seat;
         for (uint8_t s = 0; s < seats; ++s)
@@ -2030,6 +2071,7 @@ bool Session::host(const std::string& name, uint8_t seats) {
     m.my_seat = 0;
     std::mt19937_64 rng(std::random_device{}() ^ static_cast<uint64_t>(Clock::now().time_since_epoch().count()));
     m.session = rng() | 1;
+    m.my_secret = m.new_secret();
     if (!m.open()) {
         error_ = m.socket.error();
         return false;
@@ -2265,7 +2307,7 @@ void Session::send_node(uint64_t seq, std::vector<uint8_t> node) {
     // second and more, past what rollback can go back for; one lost leaves that packet unchecked)
     Impl& m = *impl_;
     std::lock_guard guard(m.lock);
-    Writer w = header(kNodeData, m.session, m.me());
+    Writer w = m.traffic(kNodeData, m.me());
     w.u64(seq), w.bytes(node);
     for (uint8_t s = 0; s < kMaxSeats; ++s)
         if (s != m.my_seat && m.peers[s].present && m.peers[s].connected && !m.peers[s].dropped)
@@ -2381,7 +2423,7 @@ void Session::leave() {
                     m.pump_reliable(s, m.peers[s]);
                 }
                 if (m.my_watch == kNoSeat) // (a player's: its datagram too, past whatever fills the channel's window)
-                    for (int k = 0; k < 3; ++k) m.send_peer(m.peers[s], header(kGoodbye, m.session, m.me()));
+                    for (int k = 0; k < 3; ++k) m.send_peer(m.peers[s], m.traffic(kGoodbye, m.me()));
                 if (const std::size_t queued = m.peers[s].rel.out.size(); queued > 1)
                     m.log("goodbye to " + m.peers[s].name + ": " + std::to_string(queued) + " reliable pieces still queued to it" +
                           (queued > kWindow ? " (past the window: the reliable goodbye not sent)" : ""));

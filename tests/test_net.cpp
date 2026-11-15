@@ -215,6 +215,36 @@ TEST_CASE("net session: two machines on this one, inputs each frame, a hash, a g
     CHECK_EQ(*host_seen.idle[1], 210u);
 }
 
+TEST_CASE("net session: a goodbye claiming a seat from another address, without that seat's secret, is ignored") {
+    Seen host_seen, guest_seen;
+    Session host(host_seen.callbacks(), 42);
+    CHECK(host.host("host", 2));
+    GameInfo game{host.session_id(), 42, "host", 2, 1, false, Address{0x7F000001u, host.port()}, {}};
+    Session guest(guest_seen.callbacks(), 42);
+    CHECK(guest.join(game, "guest"));
+    for (int i = 0; i < 300 && !host.all_seats_taken(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(host.all_seats_taken());
+    host.start(StartInfo{});
+    CHECK(guest_seen.wait([&] { return guest_seen.started; }));
+    // Someone else (the session id is in every LAN beacon and the lobby's list) sends the guest's goodbye datagram
+    // (kGoodbye = 7, seat 1) from its own address, with a secret of its own.
+    UdpSocket outsider;
+    CHECK(outsider.open(0));
+    std::vector<uint8_t> goodbye = {'S', 'K', kProtocol, 7};
+    for (int i = 0; i < 8; ++i) goodbye.push_back(static_cast<uint8_t>(host.session_id() >> (8 * i)));
+    goodbye.push_back(1);
+    for (int i = 0; i < 8; ++i) goodbye.push_back(0x5A);
+    for (int k = 0; k < 5; ++k) outsider.send_to(Address{0x7F000001u, host.port()}, goodbye);
+    // The guest goes on playing; a goodbye taken would have let its seat go within a second or two.
+    for (uint64_t f = 0; f < 150; ++f) {
+        guest.local_input(f, {1, 2, 3, 4});
+        host.local_input(f, {5, 6, 7, 8});
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    }
+    CHECK(!host_seen.wait([&] { return host_seen.idle[1].has_value(); }, 100));
+    CHECK(host_seen.wait([&] { return host_seen.inputs[1].size() == 150; }));
+}
+
 TEST_CASE("net session: the host closing the room before the game starts takes the others out") {
     Session host(Seen{}.callbacks(), 42);
     CHECK(host.host("host", 2));

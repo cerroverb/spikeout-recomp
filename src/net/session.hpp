@@ -55,7 +55,8 @@
 namespace net {
 
 constexpr uint16_t kDiscoveryPort = 47326;
-constexpr uint8_t kProtocol = 3; // (2: spectators; 3: selective acknowledgements, the state's size, catch-up in the status)
+constexpr uint8_t kProtocol = 4; // (2: spectators; 3: selective acknowledgements, the state's size, catch-up in the status;
+                                 // 4: each seat's secret, Session::Impl::received)
 constexpr std::size_t kMaxSeats = 4;
 constexpr std::chrono::milliseconds kDropAfter{3000};
 // A player in a game going on, heard nothing from for this long, is let go (its cabinet idle from the furthest of

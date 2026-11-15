@@ -11,6 +11,8 @@
 // The magic and the file's public key are the MAC's additional data.
 #pragma once
 
+#include "net/secure_random.hpp"
+
 #include <monocypher.h>
 
 #include <array>
@@ -23,21 +25,6 @@
 #include <utility>
 #include <vector>
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <bcrypt.h>
-#elif defined(__APPLE__)
-#include <stdlib.h> // (arc4random_buf)
-#else
-#include <sys/random.h>
-#endif
-
 namespace tools::lock {
 
 using Key = std::array<uint8_t, 32>;
@@ -48,22 +35,7 @@ inline constexpr std::size_t kHead = 8 + 32 + 24 + 16;
 // recording.
 inline constexpr const char* kOwnerKey = "b92fd0103c717d7d8e602f6df40a57a88247fd73ede406a7aee1a3d8623f144d";
 
-// Bytes from the system's own secure source. False if it gave none.
-inline bool random_bytes(uint8_t* out, std::size_t n) {
-#ifdef _WIN32
-    return BCryptGenRandom(nullptr, out, static_cast<ULONG>(n), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
-#elif defined(__APPLE__)
-    arc4random_buf(out, n);
-    return true;
-#else
-    while (n) {
-        const ssize_t got = getrandom(out, n, 0);
-        if (got <= 0) return false;
-        out += got, n -= static_cast<std::size_t>(got);
-    }
-    return true;
-#endif
-}
+using net::random_bytes;
 
 inline std::string hex(const uint8_t* p, std::size_t n) {
     static const char* digits = "0123456789abcdef";
