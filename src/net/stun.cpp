@@ -93,6 +93,7 @@ std::optional<StunMessage> parse(std::span<const uint8_t> d) {
     for (std::size_t at = 20; at + 4 <= 20 + length;) {
         const uint16_t type = get16(d.data() + at), n = get16(d.data() + at + 2);
         if (at + 4 + n > 20 + length) return std::nullopt;
+        if (type == kMessageIntegrity && !m.integrity_at) m.integrity_at = at;
         m.attributes.push_back({type, std::vector<uint8_t>(d.begin() + static_cast<std::ptrdiff_t>(at + 4),
                                                           d.begin() + static_cast<std::ptrdiff_t>(at + 4 + n))});
         at += 4 + ((n + 3u) & ~3u);
@@ -107,6 +108,16 @@ std::array<uint8_t, 12> new_transaction() {
     std::array<uint8_t, 12> id;
     for (auto& b : id) b = static_cast<uint8_t>(rng());
     return id;
+}
+
+bool integrity_valid(std::span<const uint8_t> data, const StunMessage& m, std::span<const uint8_t> key) {
+    constexpr std::size_t kMacSize = 20;
+    if (!m.integrity_at || m.integrity_at + 4 + kMacSize > data.size() || get16(data.data() + m.integrity_at + 2) != kMacSize)
+        return false;
+    std::vector<uint8_t> covered(data.begin(), data.begin() + static_cast<std::ptrdiff_t>(m.integrity_at));
+    set_length(covered, m.integrity_at - 20 + 4 + kMacSize);
+    const auto mac = hmac_sha1(key, covered);
+    return std::equal(mac.begin(), mac.end(), data.begin() + static_cast<std::ptrdiff_t>(m.integrity_at + 4));
 }
 
 } // namespace stun
@@ -141,6 +152,7 @@ std::vector<uint8_t> TurnClient::request(uint16_t type, const std::vector<std::p
                                          bool authenticated) {
     pending_ = stun::new_transaction();
     pending_type_ = type;
+    pending_authenticated_ = authenticated;
     std::vector<uint8_t> m = header(type, pending_);
     for (const auto& [t, v] : attributes) put_attribute(m, t, v);
     if (authenticated) {
@@ -229,6 +241,7 @@ std::optional<UdpSocket::Datagram> TurnClient::received(std::span<const uint8_t>
     if (m->id != pending_ || pending_type_ == 0) return std::nullopt;
     const uint16_t method = m->type & 0xFEEF, kind = m->type & 0x0110;
     if (method != (pending_type_ & 0xFEEF)) return std::nullopt;
+    if (pending_authenticated_ && !authentic(data, *m)) return std::nullopt; // (as if it never came: asked again)
     if (method == kCreatePermission && kind != kErrorClass && !to_permit_.empty()) to_permit_.pop_front();
     if (method == kCreatePermission && kind == kErrorClass && m->error() != 401 && m->error() != 438 && !to_permit_.empty())
         to_permit_.pop_front(); // (refused: the next)
@@ -267,6 +280,19 @@ std::optional<UdpSocket::Datagram> TurnClient::received(std::span<const uint8_t>
         refresh_due_ = Clock::now() + kRefreshEvery;
     }
     return std::nullopt;
+}
+
+// An answer to a request we signed: only with our MESSAGE-INTEGRITY, but for new credentials asked for (401, 438: a
+// relay needn't sign those, and they carry the realm and nonce to sign with). RFC 8489 9.2.5: an answer over UDP that
+// isn't signed, or whose signature is wrong, is discarded as if never received. (Our requests name no
+// PASSWORD-ALGORITHM, so the relay signs with MESSAGE-INTEGRITY, not MESSAGE-INTEGRITY-SHA256: RFC 8489 9.2.4.)
+bool TurnClient::authentic(std::span<const uint8_t> data, const StunMessage& answer) const {
+    const int code = (answer.type & 0x0110) == kErrorClass ? answer.error() : 0;
+    if (code == 401 || code == 438) return true;
+    const bool ok = stun::integrity_valid(data, answer, key_);
+    if (!ok && std::getenv("SPIKEOUT_NET_DEBUG"))
+        std::fprintf(stderr, "turn: an answer from %s without our MESSAGE-INTEGRITY, ignored\n", server_.str().c_str());
+    return ok;
 }
 
 void TurnClient::send_to(const Address& peer, std::span<const uint8_t> data, const Send& send) {

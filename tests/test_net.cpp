@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -96,6 +97,83 @@ TEST_CASE("net stun: a binding request, and an answer's address read back") {
     CHECK(!stun::is_stun(std::vector<uint8_t>{'S', 'K', 1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
     CHECK_EQ(parse_address("10.1.2.3:47000")->str(), std::string("10.1.2.3:47000"));
     CHECK(!parse_address("10.1.2:47000"));
+}
+
+TEST_CASE("net stun: MESSAGE-INTEGRITY checked as RFC 5769's long-term credentials example (2.4)") {
+    const std::vector<uint8_t> request = {
+        0x00, 0x01, 0x00, 0x60, 0x21, 0x12, 0xa4, 0x42, 0x78, 0xad, 0x34, 0x33, 0xc6, 0xad, 0x72, 0xc0, 0x29, 0xda, 0x41, 0x2e,
+        0x00, 0x06, 0x00, 0x12, 0xe3, 0x83, 0x9e, 0xe3, 0x83, 0x88, 0xe3, 0x83, 0xaa, 0xe3, 0x83, 0x83, 0xe3, 0x82, 0xaf, 0xe3,
+        0x82, 0xb9, 0x00, 0x00, 0x00, 0x15, 0x00, 0x1c, 0x66, 0x2f, 0x2f, 0x34, 0x39, 0x39, 0x6b, 0x39, 0x35, 0x34, 0x64, 0x36,
+        0x4f, 0x4c, 0x33, 0x34, 0x6f, 0x4c, 0x39, 0x46, 0x53, 0x54, 0x76, 0x79, 0x36, 0x34, 0x73, 0x41, 0x00, 0x14, 0x00, 0x0b,
+        0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x6f, 0x72, 0x67, 0x00, 0x00, 0x08, 0x00, 0x14, 0xf6, 0x70, 0x24, 0x65,
+        0x6d, 0xd6, 0x4a, 0x3e, 0x02, 0xb8, 0xe0, 0x71, 0x2e, 0x85, 0xc9, 0xa2, 0x8c, 0xa8, 0x96, 0x66};
+    // (the username U+30DE U+30C8 U+30EA U+30C3 U+30AF U+30B9 in UTF-8, the password after SASLprep)
+    const std::string username = "\xe3\x83\x9e\xe3\x83\x88\xe3\x83\xaa\xe3\x83\x83\xe3\x82\xaf\xe3\x82\xb9";
+    const auto key = md5(bytes_of(username + ":example.org:TheMatrIX"));
+    const auto m = stun::parse(request);
+    CHECK(m.has_value());
+    CHECK(stun::integrity_valid(request, *m, key));
+    std::vector<uint8_t> changed = request;
+    changed[60] ^= 1; // (a byte of the nonce)
+    CHECK(!stun::integrity_valid(changed, *stun::parse(changed), key));
+    const auto other_key = md5(bytes_of(username + ":example.org:TheMatrix"));
+    CHECK(!stun::integrity_valid(request, *m, other_key));
+}
+
+namespace {
+
+// A relay's answer, as a TURN server sends it (signed with `key` when given).
+std::vector<uint8_t> relay_answer(uint16_t type, const std::array<uint8_t, 12>& id,
+                                  const std::vector<std::pair<uint16_t, std::vector<uint8_t>>>& attributes,
+                                  const std::array<uint8_t, 16>* key) {
+    std::vector<uint8_t> m = {static_cast<uint8_t>(type >> 8), static_cast<uint8_t>(type), 0, 0, 0x21, 0x12, 0xA4, 0x42};
+    m.insert(m.end(), id.begin(), id.end());
+    auto put = [&](uint16_t t, const std::vector<uint8_t>& v) {
+        m.push_back(static_cast<uint8_t>(t >> 8)), m.push_back(static_cast<uint8_t>(t));
+        m.push_back(static_cast<uint8_t>(v.size() >> 8)), m.push_back(static_cast<uint8_t>(v.size()));
+        m.insert(m.end(), v.begin(), v.end());
+        while (m.size() % 4) m.push_back(0);
+    };
+    auto set_length = [&](std::size_t n) { m[2] = static_cast<uint8_t>(n >> 8), m[3] = static_cast<uint8_t>(n); };
+    for (const auto& [t, v] : attributes) put(t, v);
+    if (key) {
+        set_length(m.size() - 20 + 24);
+        const auto mac = hmac_sha1(*key, m);
+        put(0x0008, std::vector<uint8_t>(mac.begin(), mac.end()));
+    }
+    set_length(m.size() - 20);
+    return m;
+}
+
+} // namespace
+
+TEST_CASE("net turn: an allocation's answer counts only with the relay's MESSAGE-INTEGRITY") {
+    const Address relay{0xC6336401, 3478}; // (198.51.100.1)
+    TurnClient turn({relay}, "user", "pass");
+    std::vector<uint8_t> sent;
+    const TurnClient::Send send = [&](const Address&, std::span<const uint8_t> d) { sent.assign(d.begin(), d.end()); };
+    turn.tick(send); // the first allocation, unsigned: the relay asks for credentials
+    const std::array<uint8_t, 12> first = stun::parse(sent)->id;
+    auto text = [](const char* s) { return std::vector<uint8_t>(s, s + std::strlen(s)); };
+    turn.received(relay_answer(0x0113, first, {{0x0009, {0, 0, 4, 1}}, {0x0014, text("realm")}, {0x0015, text("nonce")}}, nullptr), send);
+    const auto signed_request = stun::parse(sent);
+    CHECK(signed_request.has_value() && signed_request->id != first);
+    const std::array<uint8_t, 12> id = signed_request->id;
+    const auto key = md5(bytes_of("user:realm:pass"));
+    const auto wrong_key = md5(bytes_of("user:realm:other"));
+    const uint16_t port = 50000 ^ 0x2112;
+    const uint32_t ip = 0xC6336401u ^ 0x2112A442u;
+    const std::vector<uint8_t> relayed = {0, 1, static_cast<uint8_t>(port >> 8), static_cast<uint8_t>(port), static_cast<uint8_t>(ip >> 24),
+                                          static_cast<uint8_t>(ip >> 16), static_cast<uint8_t>(ip >> 8), static_cast<uint8_t>(ip)};
+    turn.received(relay_answer(0x0103, id, {{0x0016, relayed}}, nullptr), send); // (unsigned: as if never come)
+    CHECK(!turn.relayed());
+    turn.received(relay_answer(0x0103, id, {{0x0016, relayed}}, &wrong_key), send); // (signed with another key)
+    CHECK(!turn.relayed());
+    turn.received(relay_answer(0x0113, id, {{0x0009, {0, 0, 4, 3}}}, nullptr), send); // (an unsigned 403 refusal)
+    CHECK(!turn.failed());
+    turn.received(relay_answer(0x0103, id, {{0x0016, relayed}}, &key), send);
+    CHECK(turn.relayed().has_value());
+    CHECK_EQ(turn.relayed()->str(), std::string("198.51.100.1:50000"));
 }
 
 TEST_CASE("net session: a host alone, a player joining the game in progress and taking the empty cabinet") {

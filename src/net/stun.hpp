@@ -30,6 +30,7 @@ struct StunMessage {
     uint16_t type = 0;
     std::array<uint8_t, 12> id{};
     std::vector<std::pair<uint16_t, std::vector<uint8_t>>> attributes;
+    std::size_t integrity_at = 0; // where its MESSAGE-INTEGRITY attribute starts (0: none)
 
     const std::vector<uint8_t>* find(uint16_t attribute) const;
     std::optional<Address> xor_address(uint16_t attribute) const; // XOR-MAPPED/RELAYED/PEER-ADDRESS
@@ -44,6 +45,9 @@ bool is_stun(std::span<const uint8_t> data);
 std::optional<StunMessage> parse(std::span<const uint8_t> data);
 std::vector<uint8_t> binding_request(const std::array<uint8_t, 12>& id);
 std::array<uint8_t, 12> new_transaction();
+// Its MESSAGE-INTEGRITY is there and right for `key` (RFC 8489 14.5: HMAC-SHA1 of the message up to it, the header's
+// length as if it ended there).
+bool integrity_valid(std::span<const uint8_t> data, const StunMessage& m, std::span<const uint8_t> key);
 } // namespace stun
 
 class TurnClient {
@@ -80,6 +84,7 @@ private:
     void create_permissions(const Send& send);
     static bool is_public(uint32_t ip);
     bool next_server(const Send& send); // (another of the servers: true if there was one)
+    bool authentic(std::span<const uint8_t> data, const StunMessage& answer) const;
 
     std::vector<Address> servers_;
     std::size_t server_at_ = 0;
@@ -91,6 +96,7 @@ private:
     std::string error_;
     std::array<uint8_t, 12> pending_{};
     uint16_t pending_type_ = 0;
+    bool pending_authenticated_ = false; // (its answer must carry our MESSAGE-INTEGRITY)
     Clock::time_point sent_{}, refresh_due_{}, permissions_due_{};
     int tries_ = 0;
     std::vector<uint32_t> permitted_; // every peer address let through (again every few minutes)
