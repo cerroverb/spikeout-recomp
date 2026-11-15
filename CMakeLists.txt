@@ -576,6 +576,12 @@ if(SPIKEOUT_INTERP)
     endif()
 endif()
 
+# The JIT's translation kept on disk (src/jit/cache.cpp: each part checked against its hash before it is loaded);
+# no LLVM in it, so the unit tests build it too.
+add_library(jit_cache src/jit/cache.cpp)
+target_include_directories(jit_cache PUBLIC src)
+target_link_libraries(jit_cache PRIVATE monocypher spikeout_warnings)
+
 # Prototype (off by default): gamerun-jit, the game translated from the
 # player's ROM at start with LLVM (src/jit), no recompiled code built in.
 # LLVM: a pinned release built once with this compiler (cmake/llvm.cmake), the
@@ -600,7 +606,7 @@ if(SPIKEOUT_LLVM_JIT)
     else()
         llvm_map_components_to_libnames(llvm_libs orcjit passes native)
     endif()
-    target_link_libraries(spikeout_jit PUBLIC recomp_runtime analysis PRIVATE ${llvm_libs} spikeout_warnings)
+    target_link_libraries(spikeout_jit PUBLIC recomp_runtime analysis PRIVATE jit_cache ${llvm_libs} spikeout_warnings)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # (LLVM 18's headers include <ciso646>, which GCC 15+ warns about with #warning)
         target_compile_options(spikeout_jit PRIVATE -Wno-cpp)
@@ -640,8 +646,9 @@ if(SPIKEOUT_BUILD_TESTS)
         tests/test_devices.cpp
         tests/test_net.cpp
         tests/test_snapshots.cpp
-        tests/test_delay.cpp)
-    target_link_libraries(spikeout_tests PRIVATE analysis m3runtime m3net spikeout_warnings)
+        tests/test_delay.cpp
+        tests/test_jit_cache.cpp)
+    target_link_libraries(spikeout_tests PRIVATE analysis m3runtime m3net jit_cache spikeout_warnings)
     if(SPIKEOUT_GPU)
         target_sources(spikeout_tests PRIVATE tests/test_gpu.cpp)
         target_link_libraries(spikeout_tests PRIVATE m3gpu)

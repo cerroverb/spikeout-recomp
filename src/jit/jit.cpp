@@ -2,6 +2,7 @@
 
 #include "analysis/boot_image.hpp"
 #include "analysis/control_flow.hpp"
+#include "jit/cache.hpp"
 #include "jit/ppc_ir.hpp"
 #include "recomp/guest.hpp"
 #include "runtime/bus.hpp"
@@ -31,7 +32,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -228,12 +228,6 @@ void check(llvm::Error e, const char* what) {
     if (e) fail(std::string(what) + ": " + llvm::toString(std::move(e)));
 }
 
-std::vector<char> read_file(const std::filesystem::path& p) {
-    std::ifstream in(p, std::ios::binary);
-    if (!in) return {};
-    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-}
-
 // A path for the log, UTF-8 (string() can throw on Windows for names outside the system's code page).
 std::string shown(const std::filesystem::path& p) {
     const std::u8string s = p.u8string();
@@ -252,8 +246,7 @@ void prune_others(const std::filesystem::path& cache, const std::filesystem::pat
         if (!std::filesystem::exists(e.path() / "part0.o", ec)) continue;
         bool only_ours = true;
         for (const auto& f : std::filesystem::directory_iterator(e.path(), ec)) {
-            const std::string n = f.path().filename().string();
-            only_ours &= f.is_regular_file(ec) && (n == "complete" || (n.rfind("part", 0) == 0 && f.path().extension() == ".o"));
+            only_ours &= f.is_regular_file(ec) && jit::cache::is_cache_file(f.path().filename().string());
         }
         if (only_ours) std::filesystem::remove_all(e.path(), ec);
     }
@@ -312,18 +305,14 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
     char key_hex[32];
     std::snprintf(key_hex, sizeof key_hex, "%016llx", static_cast<unsigned long long>(key.h));
     const std::filesystem::path dir = o.cache_dir / key_hex;
-    auto part_path = [&](uint32_t i) { return dir / ("part" + std::to_string(i) + ".o"); };
 
-    // The objects: from the cache, or made now.
+    // The objects: from the cache (kParts and the tables' part), or made now.
     std::vector<std::vector<char>> objects;
-    if (o.use_cache && std::filesystem::exists(dir / "complete")) {
-        for (uint32_t i = 0; i <= kParts; ++i) {
-            objects.push_back(read_file(part_path(i)));
-            if (objects.back().empty()) {
-                objects.clear();
-                break;
-            }
-        }
+    if (o.use_cache) {
+        cache::Loaded cached = cache::read(dir, kTranslatorVersion, kParts + 1);
+        if (!cached.problem.empty() && o.verbose)
+            std::printf( "jit: the cache in %s not used (%s): translating again\n", shown(dir).c_str(), cached.problem.c_str());
+        objects = std::move(cached.objects);
         report.from_cache = !objects.empty();
         if (report.from_cache) report.cache_path = dir;
     }
@@ -430,16 +419,7 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
         report.compile_s = seconds_since(t);
 
         if (o.use_cache) {
-            std::error_code ec;
-            std::filesystem::create_directories(dir, ec);
-            bool ok = !ec;
-            for (uint32_t i = 0; ok && i < objects.size(); ++i) {
-                std::ofstream out(part_path(i), std::ios::binary);
-                out.write(objects[i].data(), static_cast<std::streamsize>(objects[i].size()));
-                ok = static_cast<bool>(out);
-            }
-            if (ok) {
-                std::ofstream(dir / "complete") << kTranslatorVersion << "\n";
+            if (cache::write(dir, kTranslatorVersion, objects)) {
                 report.cache_path = dir;
                 if (o.prune) prune_others(o.cache_dir, dir);
             } else if (o.verbose) std::printf( "jit: couldn't write the cache in %s\n", shown(dir).c_str());
